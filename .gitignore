@@ -1,0 +1,27 @@
+# PlatformIO
+firmware/.pio/
+firmware/.vscode/
+
+# LVGL PC simulator (cloned at build time)
+lv_port_pc_vscode/
+vcpkg/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temp data
+*.tmp
+claude_monitor_data.json

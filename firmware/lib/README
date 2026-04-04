@@ -1,0 +1,3 @@
+PlatformIO Library Dependency Finder
+====================================
+Libraries are managed via lib_deps in platformio.ini
