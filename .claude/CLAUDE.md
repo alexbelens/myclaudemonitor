@@ -2,123 +2,107 @@
 
 ## Project Overview
 
-A hardware dashboard that displays Claude Code token usage, cost, burn rate, and session timer on an ESP32 "Cheap Yellow Display" (CYD). Currently in **UI development phase** (LVGL PC simulator). Hardware integration pending CYD board arrival.
+Physical desktop dashboard for Claude Code usage monitoring on an ESP32-2432S028 "Cheap Yellow Display". Three-screen touchscreen UI showing real-time metrics from claude-monitor v3.1.
 
-**Target hardware**: ESP32 CYD (320x240 2.8" LCD touchscreen, ~$15)
-**Simulator**: LVGL v9 + SDL2 on desktop (same code runs on both)
+**Hardware**: ESP32 CYD (320x240 2.8" ILI9341 LCD, XPT2046 touch, CH340 USB, WiFi/BT)
+**Status**: Working on hardware with USB serial bridge. WiFi mode planned.
 
-## Architecture (3 layers)
+## Architecture
 
 ```
-Python bridge (scripts/) --> JSON file (temp dir) --> C/LVGL UI (src/)
+PC: bridge_combined.py (claude-monitor + win32gui) <--serial--> ESP32: LVGL UI
 ```
 
-1. **Data source**: Python scripts read Claude Code session data from `~/.config/claude/` or generate mock data
-2. **Transport**: JSON written to temp file (simulator) or USB serial/BLE (hardware)
-3. **Display**: C code with LVGL renders gauges, progress bars, labels at 320x240
+- **Bridge** imports `claude_monitor.data.analysis.analyze_usage()` directly — same engine as terminal
+- **P90 limits** via `AdvancedCustomLimitDisplay._calculate_session_percentiles()`
+- **Bidirectional serial**: PC sends monitor data + window list, CYD sends switch commands + config changes
 
 ## Project Structure
 
 ```
 claude-monitor-cyd/
+├── firmware/                     # ESP32 PlatformIO project
+│   ├── platformio.ini
+│   ├── src/main.cpp              # Arduino: raw HSPI display + LVGL + touch + serial
+│   └── include/
+│       ├── lv_conf.h             # LVGL 9.2: 16-bit, 48KB heap, BTN+BAR+LABEL only
+│       └── User_Setup.h          # TFT_eSPI CYD pins (HSPI: 13/12/14/15/2)
 ├── src/
-│   ├── main.c                  # LVGL entry point (replaces lv_port_pc_vscode's main)
-│   └── claude_monitor_ui.h     # All dashboard widgets (portable to ESP32)
+│   ├── main.c                    # PC simulator (SDL2)
+│   └── claude_monitor_ui.h       # SHARED UI: 3 screens (Monitor/Windows/Settings)
 ├── scripts/
-│   ├── mock_data.py            # Fake data generator for testing (no deps)
-│   └── bridge_serial.py        # Real data bridge (reads ~/.config/claude/)
-├── setup.sh                    # Linux/macOS setup
-├── setup_windows.ps1           # Windows setup (PowerShell as Admin)
-└── README.md
+│   ├── bridge_combined.py        # Main bridge: monitor + windows + config
+│   ├── bridge_live.py            # Monitor-only bridge
+│   ├── bridge_serial.py          # Basic serial bridge
+│   ├── bridge_claude_monitor.py  # Direct JSONL parser
+│   └── mock_data.py              # Mock data (zero deps)
+├── setup.sh / setup_windows.ps1  # PC simulator setup
+└── TODO.md                       # Full roadmap
 ```
 
-## Languages & Tools
+## Key Technical Details
 
-- **C** (C99): LVGL UI code in `src/` — targets both desktop simulator and ESP32
-- **Python** (3.9+): Bridge scripts in `scripts/` — no external deps for mock_data.py, pyserial optional for bridge_serial.py
-- **CMake**: Build system for the LVGL simulator
-- **LVGL v9**: Graphics library (progress bars, labels, themes)
-- **SDL2**: Desktop simulator backend
-- **vcpkg**: Windows dependency manager for SDL2
+### Display Driver
+- Raw HSPI SPI (NOT TFT_eSPI — library doesn't work with this CYD variant)
+- X-mirror fix in LVGL flush callback (pixels written in reverse column order)
+- XY-mirror fix in touch callback (`319 - x`, `239 - y`)
+- SPI speed: 20MHz, SPI_MODE0
+
+### LVGL Configuration
+- Color depth: 16-bit RGB565
+- Heap: 48KB
+- Draw buffer: 320 x 20 lines (partial rendering)
+- Fonts: Montserrat 10 + 12 only
+- Widgets enabled: Label, Bar, Btn, Obj
+- NEON/Helium .S assembly files must be deleted after `pio run` (ARM-only, breaks Xtensa)
+
+### Serial Protocol
+- Baud: 115200
+- PC->CYD: `{"type":"monitor",...}\n` and `{"type":"windows","list":[...]}\n`
+- CYD->PC: `{"switch":<hwnd>}\n` and `{"config":{"plan":"...","view":"..."}}\n`
+- Routing: `route_serial_message()` checks `"type"` field
+
+### Three Screens
+1. **Monitor**: cost/tokens/msgs bars, burn rate, cost rate, model, depletion
+2. **Windows**: 2x5 button grid of CLI windows, tap to switch (win32gui)
+3. **Settings**: plan selector (Custom/Pro/Max5/Max20), view selector (Realtime/Daily/Monthly)
 
 ## Build & Run
 
-### Windows prerequisites
-- Git, Python 3.9+, CMake, Visual Studio Build Tools (MSVC C compiler)
-- SDL2 via vcpkg
-
-### Quick commands
+### Flash ESP32
 ```powershell
-# Setup (PowerShell as Admin)
-Set-ExecutionPolicy Bypass -Scope Process
+cd firmware
+pio run -e cyd --target upload --upload-port COM3
+# NOTE: delete .pio/**/**.S files if NEON build errors occur
+```
+
+### Run bridge
+```powershell
+uv tool run --from claude-monitor --with pyserial --with pywin32 python scripts/bridge_combined.py --port COM3
+```
+
+### PC simulator
+```powershell
 .\setup_windows.ps1
-
-# Mock data (no build needed)
 python scripts\mock_data.py --demo
-
-# Simulator (after build)
-.\lv_port_pc_vscode\build\bin\Release\main.exe
+.\lv_port_pc_vscode\bin\Release\main.exe
 ```
-
-### Linux/macOS
-```bash
-chmod +x setup.sh && ./setup.sh
-```
-
-## Key Data Flow
-
-1. `mock_data.py` or `bridge_serial.py` writes JSON to `%TEMP%\claude_monitor_data.json` (Windows) or `/tmp/claude_monitor_data.json` (Unix)
-2. The C code in `claude_monitor_ui.h` reads that file every 2 seconds via `load_data_from_file()`
-3. JSON fields: `tokens_used`, `tokens_limit`, `cost_used`, `cost_limit`, `burn_rate`, `depletion_min`, `session_elapsed_min`, `session_total_min`, `plan_name`, `warning_level`
-
-## Cross-Platform Notes
-
-- All file paths use `tempfile.gettempdir()` (Python) and `GetTempPathA()` (C on Windows)
-- The C code uses `#ifdef _WIN32` for Windows-specific temp path detection
-- Bridge script checks `sys.platform == "win32"` and uses `%APPDATA%\.config\claude\` on Windows
-
-## Plan Limits
-
-| Plan   | Tokens  | Cost    |
-|--------|---------|---------|
-| Pro    | 19,000  | $18.00  |
-| Max5   | 88,000  | $35.00  |
-| Max20  | 220,000 | $140.00 |
-
-## Warning Levels
-
-| Level | Threshold | Color  |
-|-------|-----------|--------|
-| 0     | <50%      | Green  |
-| 1     | 50-75%    | Blue   |
-| 2     | 75-90%    | Orange |
-| 3     | >90%      | Red    |
 
 ## Coding Conventions
 
-### C code (src/)
-- C99 standard (must compile on ESP32 Arduino toolchain)
-- No dynamic allocation in UI code — all LVGL objects created once at init
-- Minimal JSON parser built-in (no external deps)
-- Keep `claude_monitor_ui.h` portable: no OS-specific headers except behind `#ifdef _WIN32`
-- All widget handles are file-static globals (`static lv_obj_t *`)
+### C code (src/, firmware/)
+- C99 for UI header (ESP32 Arduino toolchain compatibility)
+- No dynamic allocation in UI — all objects created once at init
+- `#ifdef ESP32` guards for platform-specific code
+- `SERIAL_PRINTF` macro for CYD->PC output (maps to Serial.printf or printf)
 
 ### Python code (scripts/)
-- Standard library only for mock_data.py (zero deps)
-- pyserial is the only optional external dep (for bridge_serial.py serial mode)
-- Atomic file writes via `os.replace()` to prevent partial reads
-
-## Hardware Roadmap
-
-- [ ] Serial bridge for ESP32 CYD over USB
-- [ ] BLE wireless mode
-- [ ] Touch interaction (tap to cycle views)
-- [ ] Multiple view modes (realtime, daily, monthly)
-- [ ] OTA firmware update via WiFi
-- [ ] PlatformIO config for CYD board (`esp32dev`, Arduino framework, LVGL + TFT_eSPI)
+- Bridge scripts import claude-monitor modules directly via `uv tool run --from claude-monitor`
+- Threading for bidirectional serial (listener thread + main loop)
+- `BridgeState` class for mutable config shared between threads
 
 ## Related Projects
 
-- [claude-monitor](https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor) — the data engine this project extends
+- [claude-monitor](https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor) — data engine
 - [LVGL](https://lvgl.io/) — graphics library
-- [ESP32 CYD Community](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display) — hardware docs
+- [ESP32 CYD](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display) — hardware docs

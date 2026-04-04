@@ -250,8 +250,18 @@ def extract_monitor_payload(data, plan="custom"):
 
 # ── Serial listener (reads switch commands from CYD) ────────
 
+class BridgeState:
+    """Mutable state shared between main loop and serial listener."""
+    def __init__(self, plan="custom"):
+        self.plan = plan
+        self.view = "realtime"
+        self.config_changed = False
+
+_state = BridgeState()
+
 def serial_listener(ser):
-    """Background thread: reads CYD → PC commands."""
+    """Background thread: reads CYD → PC commands (switch + config)."""
+    global _state
     buf = ""
     while True:
         try:
@@ -269,6 +279,20 @@ def serial_listener(ser):
                             hwnd = int(cmd["switch"])
                             print(f"\n  >> Switch to window {hwnd}")
                             switch_to_window(hwnd)
+                        if "config" in cmd:
+                            cfg = cmd["config"]
+                            if "plan" in cfg:
+                                new_plan = cfg["plan"]
+                                if new_plan in ("custom", "pro", "max5", "max20"):
+                                    _state.plan = new_plan
+                                    _state.config_changed = True
+                                    print(f"\n  >> Plan changed to: {new_plan}")
+                            if "view" in cfg:
+                                new_view = cfg["view"]
+                                if new_view in ("realtime", "daily", "monthly"):
+                                    _state.view = new_view
+                                    _state.config_changed = True
+                                    print(f"\n  >> View changed to: {new_view}")
                     except (json.JSONDecodeError, ValueError):
                         pass
             else:
@@ -299,14 +323,18 @@ def main():
         print(f"ERROR: Cannot open {args.port}: {e}")
         sys.exit(1)
 
+    # Initialize shared state with CLI args
+    global _state
+    _state = BridgeState(plan=args.plan)
+
     print(f"Claude Monitor CYD Combined Bridge")
     print(f"  Port: {args.port} @ {SERIAL_BAUD}")
-    print(f"  Plan: {args.plan}")
+    print(f"  Plan: {args.plan} (changeable from CYD Settings screen)")
     print(f"  Monitor interval: {args.monitor_interval}s")
     print(f"  Window interval: {args.window_interval}s")
     print()
 
-    # Start background listener for switch commands from CYD
+    # Start background listener for switch + config commands from CYD
     listener = threading.Thread(target=serial_listener, args=(ser,), daemon=True)
     listener.start()
 
@@ -317,18 +345,25 @@ def main():
         while True:
             now = time.time()
 
+            # If config changed from CYD, force immediate monitor refresh
+            if _state.config_changed:
+                _state.config_changed = False
+                last_monitor = 0  # Force refresh on next tick
+
             # Send monitor data
             if now - last_monitor >= args.monitor_interval:
                 try:
+                    current_plan = _state.plan
                     data = analyze_usage(hours_back=192, quick_start=False, use_cache=False)
-                    payload = extract_monitor_payload(data, plan=args.plan)
+                    payload = extract_monitor_payload(data, plan=current_plan)
                     ser.write((json.dumps(payload, separators=(",", ":")) + "\n").encode())
                     last_monitor = now
 
                     pct = int(payload["tokens_used"] * 100 / max(payload["tokens_limit"], 1))
                     status = ["OK", "CAUTION", "WARNING", "CRITICAL"][payload["warning_level"]]
                     print(
-                        f"\r  MON: {payload['tokens_used']:>6}/{payload['tokens_limit']}({pct}%) "
+                        f"\r  [{current_plan}] "
+                        f"Tok: {payload['tokens_used']:>6}/{payload['tokens_limit']}({pct}%) "
                         f"${payload['cost_used']:.0f}/${payload['cost_limit']:.0f} "
                         f"Burn:{payload['burn_rate']:.0f}t/m "
                         f"[{status}]  ",

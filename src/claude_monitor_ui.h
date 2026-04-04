@@ -1,13 +1,13 @@
 /**
  * claude_monitor_ui.h
  *
- * Claude Monitor CYD — Dual-screen dashboard
+ * Claude Monitor CYD — Three-screen dashboard
  *
- * Screen 1: Monitor — real-time usage metrics (cost, tokens, msgs, rates)
- * Screen 2: Windows — tap buttons to switch PC terminal windows
+ * Screen 1: Monitor  — real-time usage metrics
+ * Screen 2: Windows  — tap buttons to switch PC terminal windows
+ * Screen 3: Settings — plan + view mode selection (stored in NVS)
  *
- * Tab bar at bottom of both screens: [Monitor] [Windows]
- * Tap a tab to switch views with animation.
+ * Tab bar at bottom: [Monitor] [Windows] [Settings]
  */
 
 #ifndef CLAUDE_MONITOR_UI_H
@@ -18,9 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ============================================================
- * SERIAL OUTPUT (CYD → PC for switch commands)
- * ============================================================ */
+/* Serial output (CYD -> PC) */
 #ifdef ESP32
 #include <Arduino.h>
 #define SERIAL_PRINTF(...) Serial.printf(__VA_ARGS__)
@@ -32,7 +30,6 @@
  * DATA MODELS
  * ============================================================ */
 
-/* Monitor data */
 typedef struct {
     int32_t tokens_used;
     int32_t tokens_limit;
@@ -57,7 +54,6 @@ static claude_data_t g_data = {
     999, 300, 0, 300, "Custom", "--", 0, 0,
 };
 
-/* Window list data */
 #define MAX_WINDOWS 10
 #define WIN_NAME_LEN 24
 
@@ -68,6 +64,18 @@ typedef struct {
 
 static window_entry_t g_windows[MAX_WINDOWS];
 static int g_window_count = 0;
+
+/* Settings config */
+#define NUM_PLANS 4
+#define NUM_VIEWS 3
+
+static const char *plan_names[NUM_PLANS] = {"custom", "pro", "max5", "max20"};
+static const char *plan_labels[NUM_PLANS] = {"Custom", "Pro", "Max5", "Max20"};
+static const char *view_names[NUM_VIEWS] = {"realtime", "daily", "monthly"};
+static const char *view_labels[NUM_VIEWS] = {"Realtime", "Daily", "Monthly"};
+
+static int g_selected_plan = 0;   /* 0=custom, 1=pro, 2=max5, 3=max20 */
+static int g_selected_view = 0;   /* 0=realtime, 1=daily, 2=monthly */
 
 /* ============================================================
  * THEME COLORS
@@ -91,41 +99,32 @@ static int g_window_count = 0;
 #define CM_TAB_INACTIVE lv_color_hex(0x2A2A40)
 #define CM_BTN_BG      lv_color_hex(0x16213E)
 #define CM_BTN_PRESSED lv_color_hex(0x0F3460)
+#define CM_BTN_SELECTED lv_color_hex(0x00B4D8)
 
 /* ============================================================
- * SCREENS & UI HANDLES
+ * SCREENS
  * ============================================================ */
 static lv_obj_t *scr_monitor;
 static lv_obj_t *scr_windows;
-static int current_screen = 0;  /* 0=monitor, 1=windows */
+static lv_obj_t *scr_settings;
+static int current_screen = 0;  /* 0=monitor, 1=windows, 2=settings */
 
-/* Monitor screen widgets */
-static lv_obj_t *status_led;
-static lv_obj_t *lbl_plan;
-static lv_obj_t *lbl_reset_time;
-static lv_obj_t *bar_cost;
-static lv_obj_t *lbl_cost_pct;
-static lv_obj_t *lbl_cost_detail;
-static lv_obj_t *bar_tokens;
-static lv_obj_t *lbl_tokens_pct;
-static lv_obj_t *lbl_tokens_detail;
-static lv_obj_t *bar_msgs;
-static lv_obj_t *lbl_msgs_pct;
-static lv_obj_t *lbl_msgs_detail;
-static lv_obj_t *lbl_burn;
-static lv_obj_t *lbl_cost_rate;
-static lv_obj_t *lbl_model;
-static lv_obj_t *lbl_reset;
-static lv_obj_t *lbl_depletion;
+/* Monitor widgets */
+static lv_obj_t *status_led, *lbl_plan, *lbl_reset_time;
+static lv_obj_t *bar_cost, *lbl_cost_pct, *lbl_cost_detail;
+static lv_obj_t *bar_tokens, *lbl_tokens_pct, *lbl_tokens_detail;
+static lv_obj_t *bar_msgs, *lbl_msgs_pct, *lbl_msgs_detail;
+static lv_obj_t *lbl_burn, *lbl_cost_rate, *lbl_model, *lbl_reset, *lbl_depletion;
 
-/* Tab bar widgets (on each screen) */
-static lv_obj_t *tab_monitor_1, *tab_windows_1;  /* on monitor screen */
-static lv_obj_t *tab_monitor_2, *tab_windows_2;  /* on windows screen */
-
-/* Windows screen widgets */
+/* Windows widgets */
 static lv_obj_t *lbl_win_header;
 static lv_obj_t *win_buttons[MAX_WINDOWS];
 static lv_obj_t *win_labels[MAX_WINDOWS];
+
+/* Settings widgets */
+static lv_obj_t *plan_btns[NUM_PLANS];
+static lv_obj_t *view_btns[NUM_VIEWS];
+static lv_obj_t *lbl_settings_status;
 
 /* ============================================================
  * HELPERS
@@ -185,7 +184,7 @@ static void json_get_str(const char *json, const char *key, char *out, size_t le
 }
 
 /* ============================================================
- * DATA LOADING — Monitor
+ * DATA LOADING
  * ============================================================ */
 static void load_data_from_json(const char *buf) {
     g_data.tokens_used   = json_get_int(buf, "tokens_used", g_data.tokens_used);
@@ -206,10 +205,6 @@ static void load_data_from_json(const char *buf) {
     json_get_str(buf, "model", g_data.model, sizeof(g_data.model), g_data.model);
 }
 
-/* ============================================================
- * DATA LOADING — Windows
- * Parse: {"type":"windows","list":[{"id":123,"name":"dexter"},..]}
- * ============================================================ */
 static void load_windows_from_json(const char *buf) {
     g_window_count = 0;
     const char *p = strstr(buf, "\"list\"");
@@ -217,31 +212,24 @@ static void load_windows_from_json(const char *buf) {
     p = strchr(p, '[');
     if (!p) return;
     p++;
-
     while (g_window_count < MAX_WINDOWS) {
         const char *obj = strchr(p, '{');
         if (!obj) break;
         const char *obj_end = strchr(obj, '}');
         if (!obj_end) break;
-
-        /* Extract "id" and "name" from this object */
         char sub[256];
         size_t sub_len = obj_end - obj + 1;
         if (sub_len >= sizeof(sub)) sub_len = sizeof(sub) - 1;
         memcpy(sub, obj, sub_len);
         sub[sub_len] = '\0';
-
         g_windows[g_window_count].hwnd = json_get_int(sub, "id", 0);
         json_get_str(sub, "name", g_windows[g_window_count].name, WIN_NAME_LEN, "???");
-
         g_window_count++;
         p = obj_end + 1;
     }
 }
 
-/* ============================================================
- * PC FILE LOADING (simulator only)
- * ============================================================ */
+/* PC file loading */
 #ifndef ESP32
 #ifdef _WIN32
 #include <windows.h>
@@ -270,6 +258,50 @@ static void load_data_from_file(void) {
 #endif
 
 /* ============================================================
+ * SEND CONFIG TO BRIDGE
+ * ============================================================ */
+static void send_config_to_bridge(void) {
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd),
+             "{\"config\":{\"plan\":\"%s\",\"view\":\"%s\"}}\n",
+             plan_names[g_selected_plan],
+             view_names[g_selected_view]);
+    SERIAL_PRINTF("%s", cmd);
+}
+
+/* ============================================================
+ * UPDATE SETTINGS UI
+ * ============================================================ */
+static void update_settings_ui(void) {
+    /* Highlight active plan button */
+    for (int i = 0; i < NUM_PLANS; i++) {
+        if (i == g_selected_plan) {
+            lv_obj_set_style_bg_color(plan_btns[i], CM_BTN_SELECTED, 0);
+            lv_obj_set_style_border_color(plan_btns[i], CM_BTN_SELECTED, 0);
+        } else {
+            lv_obj_set_style_bg_color(plan_btns[i], CM_BTN_BG, 0);
+            lv_obj_set_style_border_color(plan_btns[i], CM_DIVIDER, 0);
+        }
+    }
+    /* Highlight active view button */
+    for (int i = 0; i < NUM_VIEWS; i++) {
+        if (i == g_selected_view) {
+            lv_obj_set_style_bg_color(view_btns[i], CM_BTN_SELECTED, 0);
+            lv_obj_set_style_border_color(view_btns[i], CM_BTN_SELECTED, 0);
+        } else {
+            lv_obj_set_style_bg_color(view_btns[i], CM_BTN_BG, 0);
+            lv_obj_set_style_border_color(view_btns[i], CM_DIVIDER, 0);
+        }
+    }
+    /* Status line */
+    char tmp[64];
+    snprintf(tmp, sizeof(tmp), "Active: %s | %s",
+             plan_labels[g_selected_plan],
+             view_labels[g_selected_view]);
+    lv_label_set_text(lbl_settings_status, tmp);
+}
+
+/* ============================================================
  * UI UPDATE — Monitor
  * ============================================================ */
 static void update_ui(void) {
@@ -277,10 +309,9 @@ static void update_ui(void) {
     int pct;
 
     lv_label_set_text(lbl_plan, g_data.plan_name);
-
-    char reset_s[32];
-    format_time(g_data.reset_min, reset_s, sizeof(reset_s));
-    lv_label_set_text(lbl_reset_time, reset_s);
+    char rs[32];
+    format_time(g_data.reset_min, rs, sizeof(rs));
+    lv_label_set_text(lbl_reset_time, rs);
 
     switch (g_data.warning_level) {
         case 0: lv_obj_set_style_bg_color(status_led, CM_GREEN, 0); break;
@@ -289,7 +320,6 @@ static void update_ui(void) {
         default: lv_obj_set_style_bg_color(status_led, CM_RED, 0); break;
     }
 
-    /* Cost */
     pct = (g_data.cost_limit > 0.01f) ? (int)(g_data.cost_used * 100.0f / g_data.cost_limit) : 0;
     if (pct > 100) pct = 100;
     lv_bar_set_value(bar_cost, pct, LV_ANIM_ON);
@@ -299,7 +329,6 @@ static void update_ui(void) {
     snprintf(tmp, sizeof(tmp), "$%.0f / $%.0f", g_data.cost_used, g_data.cost_limit);
     lv_label_set_text(lbl_cost_detail, tmp);
 
-    /* Tokens */
     pct = (g_data.tokens_limit > 0) ? (int)((int64_t)g_data.tokens_used * 100 / g_data.tokens_limit) : 0;
     if (pct > 100) pct = 100;
     lv_bar_set_value(bar_tokens, pct, LV_ANIM_ON);
@@ -312,7 +341,6 @@ static void update_ui(void) {
     snprintf(tmp, sizeof(tmp), "%s / %s", us, ls);
     lv_label_set_text(lbl_tokens_detail, tmp);
 
-    /* Messages */
     pct = (g_data.msgs_limit > 0) ? (int)((int64_t)g_data.msgs_used * 100 / g_data.msgs_limit) : 0;
     if (pct > 100) pct = 100;
     lv_bar_set_value(bar_msgs, pct, LV_ANIM_ON);
@@ -322,13 +350,10 @@ static void update_ui(void) {
     snprintf(tmp, sizeof(tmp), "%d / %d", g_data.msgs_used, g_data.msgs_limit);
     lv_label_set_text(lbl_msgs_detail, tmp);
 
-    /* Rates */
     snprintf(tmp, sizeof(tmp), "%.1f t/m", g_data.burn_rate);
     lv_label_set_text(lbl_burn, tmp);
     snprintf(tmp, sizeof(tmp), "$%.2f/m", g_data.cost_rate);
     lv_label_set_text(lbl_cost_rate, tmp);
-
-    /* Model + Reset */
     snprintf(tmp, sizeof(tmp), "%s %d%%", g_data.model, g_data.model_pct);
     lv_label_set_text(lbl_model, tmp);
     char r2[32];
@@ -336,7 +361,6 @@ static void update_ui(void) {
     snprintf(tmp, sizeof(tmp), "Reset: %s", r2);
     lv_label_set_text(lbl_reset, tmp);
 
-    /* Footer */
     if (g_data.depletion_min < 999) {
         char ds[32];
         format_time(g_data.depletion_min, ds, sizeof(ds));
@@ -351,14 +375,10 @@ static void update_ui(void) {
     lv_label_set_text(lbl_depletion, tmp);
 }
 
-/* ============================================================
- * UI UPDATE — Windows
- * ============================================================ */
 static void update_windows_ui(void) {
     char tmp[32];
     snprintf(tmp, sizeof(tmp), "CLI Windows (%d)", g_window_count);
     lv_label_set_text(lbl_win_header, tmp);
-
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (i < g_window_count) {
             lv_label_set_text(win_labels[i], g_windows[i].name);
@@ -370,25 +390,26 @@ static void update_windows_ui(void) {
 }
 
 /* ============================================================
- * TAB SWITCHING
+ * TAB & SCREEN SWITCHING
  * ============================================================ */
-static void switch_to_monitor(void) {
-    if (current_screen == 0) return;
-    current_screen = 0;
-    lv_scr_load_anim(scr_monitor, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
-}
+static void switch_to_screen(int idx);
 
-static void switch_to_windows(void) {
-    if (current_screen == 1) return;
-    current_screen = 1;
-    lv_scr_load_anim(scr_windows, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
-}
+static void tab_monitor_cb(lv_event_t *e) { (void)e; switch_to_screen(0); }
+static void tab_windows_cb(lv_event_t *e) { (void)e; switch_to_screen(1); }
+static void tab_settings_cb(lv_event_t *e) { (void)e; switch_to_screen(2); }
 
-static void tab_monitor_cb(lv_event_t *e) { (void)e; switch_to_monitor(); }
-static void tab_windows_cb(lv_event_t *e) { (void)e; switch_to_windows(); }
+static void switch_to_screen(int idx) {
+    if (idx == current_screen) return;
+    lv_obj_t *targets[] = { scr_monitor, scr_windows, scr_settings };
+    lv_scr_load_anim_t anim = (idx > current_screen)
+        ? LV_SCR_LOAD_ANIM_MOVE_LEFT
+        : LV_SCR_LOAD_ANIM_MOVE_RIGHT;
+    current_screen = idx;
+    lv_scr_load_anim(targets[idx], anim, 200, 0, false);
+}
 
 /* ============================================================
- * WINDOW BUTTON CLICK — sends switch command to PC
+ * BUTTON CALLBACKS
  * ============================================================ */
 static void win_btn_click_cb(lv_event_t *e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
@@ -396,6 +417,24 @@ static void win_btn_click_cb(lv_event_t *e) {
         char cmd[64];
         snprintf(cmd, sizeof(cmd), "{\"switch\":%d}\n", (int)g_windows[idx].hwnd);
         SERIAL_PRINTF("%s", cmd);
+    }
+}
+
+static void plan_btn_cb(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx >= 0 && idx < NUM_PLANS && idx != g_selected_plan) {
+        g_selected_plan = idx;
+        update_settings_ui();
+        send_config_to_bridge();
+    }
+}
+
+static void view_btn_cb(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx >= 0 && idx < NUM_VIEWS && idx != g_selected_view) {
+        g_selected_view = idx;
+        update_settings_ui();
+        send_config_to_bridge();
     }
 }
 
@@ -452,99 +491,101 @@ static void create_divider(lv_obj_t *scr, int y) {
     lv_obj_set_scrollbar_mode(div, LV_SCROLLBAR_MODE_OFF);
 }
 
-/* Create the tab bar on a screen */
-static void create_tab_bar(lv_obj_t *scr, lv_obj_t **tab_mon, lv_obj_t **tab_win, int active_idx) {
-    /* Background strip */
-    lv_obj_t *bar_bg = lv_obj_create(scr);
-    lv_obj_set_size(bar_bg, 320, 24);
-    lv_obj_set_pos(bar_bg, 0, 216);
-    lv_obj_set_style_bg_color(bar_bg, lv_color_hex(0x0A0A1A), 0);
-    lv_obj_set_style_bg_opa(bar_bg, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(bar_bg, 0, 0);
-    lv_obj_set_style_radius(bar_bg, 0, 0);
-    lv_obj_set_style_pad_all(bar_bg, 0, 0);
-    lv_obj_set_scrollbar_mode(bar_bg, LV_SCROLLBAR_MODE_OFF);
+/* Create a styled selection button */
+static lv_obj_t* create_select_btn(lv_obj_t *parent, const char *label_text,
+                                    int x, int y, int w, int h,
+                                    lv_event_cb_t cb, int user_data_idx) {
+    lv_obj_t *btn = lv_btn_create(parent);
+    lv_obj_set_size(btn, w, h);
+    lv_obj_set_pos(btn, x, y);
+    lv_obj_set_style_bg_color(btn, CM_BTN_BG, 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(btn, CM_BTN_PRESSED, LV_STATE_PRESSED);
+    lv_obj_set_style_radius(btn, 6, 0);
+    lv_obj_set_style_border_width(btn, 2, 0);
+    lv_obj_set_style_border_color(btn, CM_DIVIDER, 0);
+    lv_obj_set_style_pad_all(btn, 0, 0);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, (void *)(intptr_t)user_data_idx);
 
-    /* Monitor tab (left half) */
-    *tab_mon = lv_btn_create(bar_bg);
-    lv_obj_set_size(*tab_mon, 156, 22);
-    lv_obj_set_pos(*tab_mon, 2, 1);
-    lv_obj_set_style_bg_color(*tab_mon, active_idx == 0 ? CM_TAB_ACTIVE : CM_TAB_INACTIVE, 0);
-    lv_obj_set_style_bg_opa(*tab_mon, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(*tab_mon, 4, 0);
-    lv_obj_set_style_border_width(*tab_mon, 0, 0);
-    lv_obj_set_style_pad_all(*tab_mon, 0, 0);
-    lv_obj_add_event_cb(*tab_mon, tab_monitor_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl = lv_label_create(btn);
+    lv_label_set_text(lbl, label_text);
+    lv_obj_set_style_text_color(lbl, CM_TEXT_PRIM, 0);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
+    lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 0);
 
-    lv_obj_t *lm = lv_label_create(*tab_mon);
-    lv_label_set_text(lm, "Monitor");
-    lv_obj_set_style_text_color(lm, active_idx == 0 ? CM_BG_DARK : CM_TEXT_SEC, 0);
-    lv_obj_set_style_text_font(lm, &lv_font_montserrat_10, 0);
-    lv_obj_align(lm, LV_ALIGN_CENTER, 0, 0);
+    return btn;
+}
 
-    /* Windows tab (right half) */
-    *tab_win = lv_btn_create(bar_bg);
-    lv_obj_set_size(*tab_win, 156, 22);
-    lv_obj_set_pos(*tab_win, 162, 1);
-    lv_obj_set_style_bg_color(*tab_win, active_idx == 1 ? CM_TAB_ACTIVE : CM_TAB_INACTIVE, 0);
-    lv_obj_set_style_bg_opa(*tab_win, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(*tab_win, 4, 0);
-    lv_obj_set_style_border_width(*tab_win, 0, 0);
-    lv_obj_set_style_pad_all(*tab_win, 0, 0);
-    lv_obj_add_event_cb(*tab_win, tab_windows_cb, LV_EVENT_CLICKED, NULL);
+/* 3-tab bar */
+static void create_tab_bar_3(lv_obj_t *scr, int active_idx) {
+    lv_obj_t *bg = lv_obj_create(scr);
+    lv_obj_set_size(bg, 320, 24);
+    lv_obj_set_pos(bg, 0, 216);
+    lv_obj_set_style_bg_color(bg, lv_color_hex(0x0A0A1A), 0);
+    lv_obj_set_style_bg_opa(bg, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(bg, 0, 0);
+    lv_obj_set_style_radius(bg, 0, 0);
+    lv_obj_set_style_pad_all(bg, 0, 0);
+    lv_obj_set_scrollbar_mode(bg, LV_SCROLLBAR_MODE_OFF);
 
-    lv_obj_t *lw = lv_label_create(*tab_win);
-    lv_label_set_text(lw, "Windows");
-    lv_obj_set_style_text_color(lw, active_idx == 1 ? CM_BG_DARK : CM_TEXT_SEC, 0);
-    lv_obj_set_style_text_font(lw, &lv_font_montserrat_10, 0);
-    lv_obj_align(lw, LV_ALIGN_CENTER, 0, 0);
+    struct { const char *text; lv_event_cb_t cb; } tabs[] = {
+        {"Monitor",  tab_monitor_cb},
+        {"Windows",  tab_windows_cb},
+        {"Settings", tab_settings_cb},
+    };
+
+    int tab_w = 102;
+    for (int i = 0; i < 3; i++) {
+        lv_obj_t *btn = lv_btn_create(bg);
+        lv_obj_set_size(btn, tab_w, 22);
+        lv_obj_set_pos(btn, 2 + i * (tab_w + 4), 1);
+        lv_obj_set_style_bg_color(btn, i == active_idx ? CM_TAB_ACTIVE : CM_TAB_INACTIVE, 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_border_width(btn, 0, 0);
+        lv_obj_set_style_pad_all(btn, 0, 0);
+        lv_obj_add_event_cb(btn, tabs[i].cb, LV_EVENT_CLICKED, NULL);
+
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, tabs[i].text);
+        lv_obj_set_style_text_color(lbl, i == active_idx ? CM_BG_DARK : CM_TEXT_SEC, 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
+        lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 0);
+    }
 }
 
 /* ============================================================
- * BUILD MONITOR SCREEN
+ * BUILD SCREENS
  * ============================================================ */
+
 static void build_monitor_screen(lv_obj_t *scr) {
     lv_obj_set_style_bg_color(scr, CM_BG_DARK, 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
     /* Header */
-    lv_obj_t *header = lv_obj_create(scr);
-    lv_obj_set_size(header, 320, 26);
-    lv_obj_set_pos(header, 0, 0);
-    lv_obj_set_style_bg_color(header, CM_HEADER_BG, 0);
-    lv_obj_set_style_bg_opa(header, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(header, 0, 0);
-    lv_obj_set_style_radius(header, 0, 0);
-    lv_obj_set_style_pad_all(header, 3, 0);
-    lv_obj_set_scrollbar_mode(header, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_t *hdr = lv_obj_create(scr);
+    lv_obj_set_size(hdr, 320, 26); lv_obj_set_pos(hdr, 0, 0);
+    lv_obj_set_style_bg_color(hdr, CM_HEADER_BG, 0); lv_obj_set_style_bg_opa(hdr, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(hdr, 0, 0); lv_obj_set_style_radius(hdr, 0, 0);
+    lv_obj_set_style_pad_all(hdr, 3, 0); lv_obj_set_scrollbar_mode(hdr, LV_SCROLLBAR_MODE_OFF);
 
-    status_led = lv_obj_create(header);
-    lv_obj_set_size(status_led, 8, 8);
-    lv_obj_align(status_led, LV_ALIGN_LEFT_MID, 2, 0);
-    lv_obj_set_style_bg_color(status_led, CM_GREEN, 0);
-    lv_obj_set_style_bg_opa(status_led, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(status_led, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_border_width(status_led, 0, 0);
+    status_led = lv_obj_create(hdr);
+    lv_obj_set_size(status_led, 8, 8); lv_obj_align(status_led, LV_ALIGN_LEFT_MID, 2, 0);
+    lv_obj_set_style_bg_color(status_led, CM_GREEN, 0); lv_obj_set_style_bg_opa(status_led, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(status_led, LV_RADIUS_CIRCLE, 0); lv_obj_set_style_border_width(status_led, 0, 0);
 
-    lv_obj_t *t = lv_label_create(header);
-    lv_label_set_text(t, "CLAUDE MONITOR");
-    lv_obj_set_style_text_color(t, CM_TEXT_PRIM, 0);
-    lv_obj_set_style_text_font(t, &lv_font_montserrat_10, 0);
-    lv_obj_align(t, LV_ALIGN_LEFT_MID, 16, 0);
+    lv_obj_t *t = lv_label_create(hdr);
+    lv_label_set_text(t, "CLAUDE MONITOR"); lv_obj_set_style_text_color(t, CM_TEXT_PRIM, 0);
+    lv_obj_set_style_text_font(t, &lv_font_montserrat_10, 0); lv_obj_align(t, LV_ALIGN_LEFT_MID, 16, 0);
 
-    lbl_plan = lv_label_create(header);
-    lv_label_set_text(lbl_plan, "Custom");
-    lv_obj_set_style_text_color(lbl_plan, CM_MODEL_COLOR, 0);
-    lv_obj_set_style_text_font(lbl_plan, &lv_font_montserrat_10, 0);
-    lv_obj_align(lbl_plan, LV_ALIGN_CENTER, 30, 0);
+    lbl_plan = lv_label_create(hdr);
+    lv_label_set_text(lbl_plan, "Custom"); lv_obj_set_style_text_color(lbl_plan, CM_MODEL_COLOR, 0);
+    lv_obj_set_style_text_font(lbl_plan, &lv_font_montserrat_10, 0); lv_obj_align(lbl_plan, LV_ALIGN_CENTER, 30, 0);
 
-    lbl_reset_time = lv_label_create(header);
-    lv_label_set_text(lbl_reset_time, "5h 00m");
-    lv_obj_set_style_text_color(lbl_reset_time, CM_TEXT_SEC, 0);
-    lv_obj_set_style_text_font(lbl_reset_time, &lv_font_montserrat_10, 0);
-    lv_obj_align(lbl_reset_time, LV_ALIGN_RIGHT_MID, -4, 0);
+    lbl_reset_time = lv_label_create(hdr);
+    lv_label_set_text(lbl_reset_time, "5h 00m"); lv_obj_set_style_text_color(lbl_reset_time, CM_TEXT_SEC, 0);
+    lv_obj_set_style_text_font(lbl_reset_time, &lv_font_montserrat_10, 0); lv_obj_align(lbl_reset_time, LV_ALIGN_RIGHT_MID, -4, 0);
 
-    /* Metric rows */
     int y = 32;
     metric_row_t cr = create_metric_row(scr, "Cost", CM_GREEN, y);
     bar_cost = cr.bar; lbl_cost_pct = cr.pct_label; lbl_cost_detail = cr.detail_label;
@@ -559,7 +600,7 @@ static void build_monitor_screen(lv_obj_t *scr) {
 
     create_divider(scr, 119);
 
-    /* Stats cards */
+    /* Stats card 1 */
     lv_obj_t *c1 = lv_obj_create(scr);
     lv_obj_set_size(c1, 304, 26); lv_obj_set_pos(c1, 8, 124);
     lv_obj_set_style_bg_color(c1, CM_BG_CARD, 0); lv_obj_set_style_bg_opa(c1, LV_OPA_COVER, 0);
@@ -580,6 +621,7 @@ static void build_monitor_screen(lv_obj_t *scr) {
     lv_label_set_text(lbl_cost_rate, "$0.00/m"); lv_obj_set_style_text_color(lbl_cost_rate, CM_GREEN, 0);
     lv_obj_set_style_text_font(lbl_cost_rate, &lv_font_montserrat_10, 0); lv_obj_align(lbl_cost_rate, LV_ALIGN_CENTER, 62, 0);
 
+    /* Stats card 2 */
     lv_obj_t *c2 = lv_obj_create(scr);
     lv_obj_set_size(c2, 304, 26); lv_obj_set_pos(c2, 8, 154);
     lv_obj_set_style_bg_color(c2, CM_BG_CARD, 0); lv_obj_set_style_bg_opa(c2, LV_OPA_COVER, 0);
@@ -599,34 +641,24 @@ static void build_monitor_screen(lv_obj_t *scr) {
 
     create_divider(scr, 184);
 
-    /* Footer */
     lbl_depletion = lv_label_create(scr);
     lv_label_set_text(lbl_depletion, "Active session | P90 limits");
     lv_obj_set_style_text_color(lbl_depletion, CM_TEXT_DIM, 0);
     lv_obj_set_style_text_font(lbl_depletion, &lv_font_montserrat_10, 0);
     lv_obj_set_pos(lbl_depletion, 60, 194);
 
-    /* Tab bar */
-    create_tab_bar(scr, &tab_monitor_1, &tab_windows_1, 0);
+    create_tab_bar_3(scr, 0);
 }
 
-/* ============================================================
- * BUILD WINDOWS SCREEN
- * ============================================================ */
 static void build_windows_screen(lv_obj_t *scr) {
     lv_obj_set_style_bg_color(scr, CM_BG_DARK, 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
-    /* Header */
     lv_obj_t *wh = lv_obj_create(scr);
-    lv_obj_set_size(wh, 320, 26);
-    lv_obj_set_pos(wh, 0, 0);
-    lv_obj_set_style_bg_color(wh, CM_HEADER_BG, 0);
-    lv_obj_set_style_bg_opa(wh, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(wh, 0, 0);
-    lv_obj_set_style_radius(wh, 0, 0);
-    lv_obj_set_style_pad_all(wh, 3, 0);
-    lv_obj_set_scrollbar_mode(wh, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_size(wh, 320, 26); lv_obj_set_pos(wh, 0, 0);
+    lv_obj_set_style_bg_color(wh, CM_HEADER_BG, 0); lv_obj_set_style_bg_opa(wh, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(wh, 0, 0); lv_obj_set_style_radius(wh, 0, 0);
+    lv_obj_set_style_pad_all(wh, 3, 0); lv_obj_set_scrollbar_mode(wh, LV_SCROLLBAR_MODE_OFF);
 
     lbl_win_header = lv_label_create(wh);
     lv_label_set_text(lbl_win_header, "CLI Windows (0)");
@@ -634,21 +666,12 @@ static void build_windows_screen(lv_obj_t *scr) {
     lv_obj_set_style_text_font(lbl_win_header, &lv_font_montserrat_10, 0);
     lv_obj_align(lbl_win_header, LV_ALIGN_LEFT_MID, 8, 0);
 
-    /* Button grid: 2 columns x 5 rows, in area y=30 to y=212 */
-    int col_w = 148;
-    int row_h = 36;
-    int pad = 4;
-    int start_y = 30;
-
     for (int i = 0; i < MAX_WINDOWS; i++) {
-        int col = i % 2;
-        int row = i / 2;
-        int x = 8 + col * (col_w + pad);
-        int y = start_y + row * (row_h + pad);
+        int col = i % 2, row = i / 2;
+        int x = 8 + col * 152, y = 30 + row * 40;
 
         win_buttons[i] = lv_btn_create(scr);
-        lv_obj_set_size(win_buttons[i], col_w, row_h);
-        lv_obj_set_pos(win_buttons[i], x, y);
+        lv_obj_set_size(win_buttons[i], 148, 36); lv_obj_set_pos(win_buttons[i], x, y);
         lv_obj_set_style_bg_color(win_buttons[i], CM_BTN_BG, 0);
         lv_obj_set_style_bg_opa(win_buttons[i], LV_OPA_COVER, 0);
         lv_obj_set_style_bg_color(win_buttons[i], CM_BTN_PRESSED, LV_STATE_PRESSED);
@@ -666,12 +689,81 @@ static void build_windows_screen(lv_obj_t *scr) {
         lv_obj_align(win_labels[i], LV_ALIGN_CENTER, 0, 0);
     }
 
+    create_tab_bar_3(scr, 1);
+}
+
+static void build_settings_screen(lv_obj_t *scr) {
+    lv_obj_set_style_bg_color(scr, CM_BG_DARK, 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+
+    /* Header */
+    lv_obj_t *hdr = lv_obj_create(scr);
+    lv_obj_set_size(hdr, 320, 26); lv_obj_set_pos(hdr, 0, 0);
+    lv_obj_set_style_bg_color(hdr, CM_HEADER_BG, 0); lv_obj_set_style_bg_opa(hdr, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(hdr, 0, 0); lv_obj_set_style_radius(hdr, 0, 0);
+    lv_obj_set_style_pad_all(hdr, 3, 0); lv_obj_set_scrollbar_mode(hdr, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t *ht = lv_label_create(hdr);
+    lv_label_set_text(ht, "Settings");
+    lv_obj_set_style_text_color(ht, CM_TEXT_PRIM, 0);
+    lv_obj_set_style_text_font(ht, &lv_font_montserrat_12, 0);
+    lv_obj_align(ht, LV_ALIGN_LEFT_MID, 8, 0);
+
+    /* Plan section */
+    lv_obj_t *pl = lv_label_create(scr);
+    lv_label_set_text(pl, "Plan:");
+    lv_obj_set_style_text_color(pl, CM_TEXT_SEC, 0);
+    lv_obj_set_style_text_font(pl, &lv_font_montserrat_10, 0);
+    lv_obj_set_pos(pl, 10, 36);
+
+    int btn_w = 70, btn_h = 32, gap = 6;
+    int start_x = 10;
+    for (int i = 0; i < NUM_PLANS; i++) {
+        plan_btns[i] = create_select_btn(scr, plan_labels[i],
+            start_x + i * (btn_w + gap), 50, btn_w, btn_h,
+            plan_btn_cb, i);
+    }
+
+    /* Divider */
+    create_divider(scr, 92);
+
+    /* View section */
+    lv_obj_t *vl = lv_label_create(scr);
+    lv_label_set_text(vl, "View:");
+    lv_obj_set_style_text_color(vl, CM_TEXT_SEC, 0);
+    lv_obj_set_style_text_font(vl, &lv_font_montserrat_10, 0);
+    lv_obj_set_pos(vl, 10, 102);
+
+    int vbtn_w = 95;
+    for (int i = 0; i < NUM_VIEWS; i++) {
+        view_btns[i] = create_select_btn(scr, view_labels[i],
+            start_x + i * (vbtn_w + gap), 116, vbtn_w, btn_h,
+            view_btn_cb, i);
+    }
+
+    /* Divider */
+    create_divider(scr, 158);
+
+    /* Status line */
+    lbl_settings_status = lv_label_create(scr);
+    lv_label_set_text(lbl_settings_status, "Active: Custom | Realtime");
+    lv_obj_set_style_text_color(lbl_settings_status, CM_GREEN, 0);
+    lv_obj_set_style_text_font(lbl_settings_status, &lv_font_montserrat_10, 0);
+    lv_obj_set_pos(lbl_settings_status, 10, 170);
+
+    /* Hint */
+    lv_obj_t *hint = lv_label_create(scr);
+    lv_label_set_text(hint, "Tap to change. Sent to bridge instantly.");
+    lv_obj_set_style_text_color(hint, CM_TEXT_DIM, 0);
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_pos(hint, 10, 190);
+
     /* Tab bar */
-    create_tab_bar(scr, &tab_monitor_2, &tab_windows_2, 1);
+    create_tab_bar_3(scr, 2);
 }
 
 /* ============================================================
- * PC TIMER CALLBACK
+ * PC TIMER
  * ============================================================ */
 #ifndef ESP32
 static void data_poll_cb(lv_timer_t *timer) {
@@ -682,18 +774,20 @@ static void data_poll_cb(lv_timer_t *timer) {
 #endif
 
 /* ============================================================
- * MAIN UI ENTRY POINT
+ * MAIN ENTRY POINT
  * ============================================================ */
 static void claude_monitor_create_ui(void) {
-    /* Screen 1: Monitor (starts as active) */
     scr_monitor = lv_screen_active();
     build_monitor_screen(scr_monitor);
 
-    /* Screen 2: Windows */
     scr_windows = lv_obj_create(NULL);
     build_windows_screen(scr_windows);
 
+    scr_settings = lv_obj_create(NULL);
+    build_settings_screen(scr_settings);
+
     current_screen = 0;
+    update_settings_ui();
 
 #ifndef ESP32
     lv_timer_create(data_poll_cb, 2000, NULL);
