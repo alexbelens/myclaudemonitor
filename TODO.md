@@ -21,6 +21,81 @@
 
 - [ ] Touch calibration fine-tuning (XY mirror confirmed working, precision TBD)
 
+## Next: Settings Screen (Plan + View Selection)
+
+Add a third screen to the CYD for changing plan and view mode directly from the touchscreen. Settings persist in ESP32 NVS flash and are sent to the bridge on connect.
+
+### Screen Layout (320x240)
+
+```
+┌──────────────────────────────────┐
+│  Settings                        │  header (26px)
+├──────────────────────────────────┤
+│                                  │
+│  Plan:                           │
+│  ┌──────┐┌──────┐┌──────┐┌────┐ │
+│  │Custom││ Pro  ││ Max5 ││Max20│ │  plan selector (44px)
+│  └──────┘└──────┘└──────┘└────┘ │
+│                                  │
+│  View:                           │
+│  ┌──────────┐┌───────┐┌────────┐│
+│  │ Realtime ││ Daily ││Monthly ││  view selector (44px)
+│  └──────────┘└───────┘└────────┘│
+│                                  │
+│  Active: Custom (P90) | Realtime │  status line
+│                                  │
+├──────────────────────────────────┤
+│ [Monitor]  [Windows]  [Settings] │  tab bar (24px)
+└──────────────────────────────────┘
+```
+
+### Firmware Changes
+
+- [ ] Add third screen (`scr_settings`) to `claude_monitor_ui.h`
+- [ ] Update tab bar to 3 tabs: Monitor | Windows | Settings
+- [ ] Plan selector: 4 toggle buttons (Custom/Pro/Max5/Max20)
+  - Active plan highlighted with accent color
+  - Tapping a plan sends `{"config":{"plan":"max5"}}` to bridge via serial
+- [ ] View selector: 3 toggle buttons (Realtime/Daily/Monthly)
+  - Active view highlighted
+  - Tapping sends `{"config":{"view":"daily"}}` to bridge
+- [ ] Store selected plan + view in ESP32 NVS via `Preferences` library
+  - Persists across reboots
+  - On boot, send saved config to bridge automatically
+- [ ] Status line showing current active plan and view mode
+- [ ] Enable `LV_USE_BTNMATRIX` in lv_conf.h (efficient button group widget)
+
+### Bridge Changes
+
+- [ ] Listen for `{"config":{...}}` messages from CYD
+- [ ] When plan changes: re-run `analyze_usage()` with new plan parameter
+- [ ] When view changes: switch between realtime/daily/monthly data format
+  - Realtime: current active block (existing)
+  - Daily: `UsageAggregator` with `aggregation_mode="daily"`
+  - Monthly: `UsageAggregator` with `aggregation_mode="monthly"`
+- [ ] Send acknowledgment `{"config_ack":{"plan":"max5","view":"realtime"}}` back to CYD
+- [ ] On connect, request config from CYD: `{"get_config":true}`
+
+### Protocol
+
+```
+CYD → PC:  {"config":{"plan":"max5"}}\n           (plan change)
+CYD → PC:  {"config":{"view":"daily"}}\n          (view change)
+CYD → PC:  {"config":{"plan":"pro","view":"monthly"}}\n  (both)
+PC → CYD:  {"config_ack":{"plan":"max5","view":"realtime"}}\n
+PC → CYD:  {"get_config":true}\n                   (on connect)
+CYD → PC:  {"config":{"plan":"custom","view":"realtime"}}\n (response)
+```
+
+### Testing
+
+- [ ] Tap plan buttons → bridge switches limits, CYD updates display
+- [ ] Tap view buttons → bridge sends daily/monthly data, CYD renders new format
+- [ ] Reboot CYD → settings persist, bridge picks them up on reconnect
+- [ ] Settings screen works alongside Monitor and Windows screens
+
+---
+
 ## Next: WiFi Connection
 
 Replace USB serial data link with WiFi while keeping USB as fallback.
