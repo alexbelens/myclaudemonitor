@@ -95,7 +95,6 @@ static lv_obj_t *scr_settings;
 static int current_screen = 0;
 
 /* Monitor */
-static lv_obj_t *status_dot;
 static lv_obj_t *lbl_clock;
 static lv_obj_t *lbl_date;
 static lv_obj_t *lbl_weather_temp;
@@ -440,11 +439,10 @@ static void update_wifi_ui(void) {
 static void update_ui(void) {
     char tmp[48];
 
-    /* Status dot */
-    lv_color_t dot_col = g_data.warning_level == 0 ? CM_GREEN  :
+    /* Accent stripe color = warning level */
+    lv_color_t dot_col = g_data.warning_level == 0 ? CM_ACCENT :
                          g_data.warning_level == 1 ? CM_YELLOW :
                          g_data.warning_level == 2 ? CM_ORANGE : CM_RED;
-    lv_obj_set_style_bg_color(status_dot, dot_col, 0);
     lv_obj_set_style_bg_color(accent_bar, dot_col, 0);
 
     /* Session percentage */
@@ -532,28 +530,19 @@ static void build_monitor_screen(lv_obj_t *scr) {
     lv_obj_set_style_pad_all(hdr, 0, 0);
     lv_obj_set_scrollbar_mode(hdr, LV_SCROLLBAR_MODE_OFF);
 
-    /* Status dot */
-    status_dot = lv_obj_create(hdr);
-    lv_obj_set_size(status_dot, 8, 8);
-    lv_obj_set_pos(status_dot, 8, 8);
-    lv_obj_set_style_bg_color(status_dot, CM_GREEN, 0);
-    lv_obj_set_style_bg_opa(status_dot, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(status_dot, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_border_width(status_dot, 0, 0);
-
     /* Clock — left, montserrat_28 */
     lbl_clock = lv_label_create(hdr);
     lv_label_set_text(lbl_clock, "--:--");
     lv_obj_set_style_text_font(lbl_clock, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(lbl_clock, CM_TEXT_PRIM, 0);
-    lv_obj_set_pos(lbl_clock, 20, 4);
+    lv_obj_set_pos(lbl_clock, 8, 4);
 
-    /* Date — left, montserrat_10, directly below clock (~y=38+4=42) */
+    /* Date — left, montserrat_10, directly below clock */
     lbl_date = lv_label_create(hdr);
     lv_label_set_text(lbl_date, "---");
     lv_obj_set_style_text_font(lbl_date, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(lbl_date, CM_TEXT_SEC, 0);
-    lv_obj_set_pos(lbl_date, 20, 44);
+    lv_obj_set_pos(lbl_date, 8, 44);
 
     /* Weather temp — right column, montserrat_28, right-aligned */
     lbl_weather_temp = lv_label_create(hdr);
