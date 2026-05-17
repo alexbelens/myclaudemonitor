@@ -3,11 +3,11 @@
  *
  * Claude Monitor CYD — Three-screen dashboard
  *
- * Screen 1: Monitor  — real-time usage metrics
- * Screen 2: Windows  — tap buttons to switch PC terminal windows
- * Screen 3: Settings — plan + view mode selection (stored in NVS)
+ * Screen 0: Monitor  — real-time usage metrics
+ * Screen 1: Settings — plan + view mode selection (stored in NVS)
+ * Screen 2: WiFi     — connect / AP captive portal setup
  *
- * Tab bar at bottom: [Monitor] [Windows] [Settings]
+ * Tab bar at bottom: [Monitor] [Settings] [WiFi]
  */
 
 #ifndef CLAUDE_MONITOR_UI_H
@@ -54,17 +54,6 @@ static claude_data_t g_data = {
     999, 300, 0, 300, "Custom", "--", 0, 0,
 };
 
-#define MAX_WINDOWS 10
-#define WIN_NAME_LEN 24
-
-typedef struct {
-    int32_t hwnd;
-    char name[WIN_NAME_LEN];
-} window_entry_t;
-
-static window_entry_t g_windows[MAX_WINDOWS];
-static int g_window_count = 0;
-
 /* Settings config */
 #define NUM_PLANS 4
 #define NUM_VIEWS 3
@@ -76,6 +65,22 @@ static const char *view_labels[NUM_VIEWS] = {"Realtime", "Daily", "Monthly"};
 
 static int g_selected_plan = 0;   /* 0=custom, 1=pro, 2=max5, 3=max20 */
 static int g_selected_view = 0;   /* 0=realtime, 1=daily, 2=monthly */
+
+/* ============================================================
+ * WIFI UI STATE (shared with main.cpp)
+ * ============================================================ */
+
+typedef enum {
+    WIFI_STATE_DISCONNECTED,
+    WIFI_STATE_CONNECTED,
+    WIFI_STATE_AP_ACTIVE
+} wifi_ui_state_t;
+
+static wifi_ui_state_t g_wifi_ui_state = WIFI_STATE_DISCONNECTED;
+static char g_wifi_ui_ssid[64] = {0};
+static char g_wifi_ui_ip[32]   = {0};
+static bool g_request_ap_portal = false;
+static bool g_cancel_ap_portal  = false;
 
 /* ============================================================
  * THEME COLORS
@@ -105,9 +110,9 @@ static int g_selected_view = 0;   /* 0=realtime, 1=daily, 2=monthly */
  * SCREENS
  * ============================================================ */
 static lv_obj_t *scr_monitor;
-static lv_obj_t *scr_windows;
 static lv_obj_t *scr_settings;
-static int current_screen = 0;  /* 0=monitor, 1=windows, 2=settings */
+static lv_obj_t *scr_wifi;
+static int current_screen = 0;  /* 0=monitor, 1=settings, 2=wifi */
 
 /* Monitor widgets */
 static lv_obj_t *status_led, *lbl_plan, *lbl_reset_time;
@@ -116,15 +121,20 @@ static lv_obj_t *bar_tokens, *lbl_tokens_pct, *lbl_tokens_detail;
 static lv_obj_t *bar_msgs, *lbl_msgs_pct, *lbl_msgs_detail;
 static lv_obj_t *lbl_burn, *lbl_cost_rate, *lbl_model, *lbl_reset, *lbl_depletion;
 
-/* Windows widgets */
-static lv_obj_t *lbl_win_header;
-static lv_obj_t *win_buttons[MAX_WINDOWS];
-static lv_obj_t *win_labels[MAX_WINDOWS];
-
 /* Settings widgets */
 static lv_obj_t *plan_btns[NUM_PLANS];
 static lv_obj_t *view_btns[NUM_VIEWS];
 static lv_obj_t *lbl_settings_status;
+
+/* WiFi screen widgets */
+static lv_obj_t *lbl_wifi_state;
+static lv_obj_t *lbl_wifi_ssid_val;
+static lv_obj_t *lbl_wifi_ip_val;
+static lv_obj_t *btn_wifi_action;
+static lv_obj_t *lbl_btn_wifi_action;
+static lv_obj_t *lbl_wifi_hint1;
+static lv_obj_t *lbl_wifi_hint2;
+static lv_obj_t *lbl_wifi_hint3;
 
 /* ============================================================
  * HELPERS
@@ -205,30 +215,6 @@ static void load_data_from_json(const char *buf) {
     json_get_str(buf, "model", g_data.model, sizeof(g_data.model), g_data.model);
 }
 
-static void load_windows_from_json(const char *buf) {
-    g_window_count = 0;
-    const char *p = strstr(buf, "\"list\"");
-    if (!p) return;
-    p = strchr(p, '[');
-    if (!p) return;
-    p++;
-    while (g_window_count < MAX_WINDOWS) {
-        const char *obj = strchr(p, '{');
-        if (!obj) break;
-        const char *obj_end = strchr(obj, '}');
-        if (!obj_end) break;
-        char sub[256];
-        size_t sub_len = obj_end - obj + 1;
-        if (sub_len >= sizeof(sub)) sub_len = sizeof(sub) - 1;
-        memcpy(sub, obj, sub_len);
-        sub[sub_len] = '\0';
-        g_windows[g_window_count].hwnd = json_get_int(sub, "id", 0);
-        json_get_str(sub, "name", g_windows[g_window_count].name, WIN_NAME_LEN, "???");
-        g_window_count++;
-        p = obj_end + 1;
-    }
-}
-
 /* PC file loading */
 #ifndef ESP32
 #ifdef _WIN32
@@ -299,6 +285,47 @@ static void update_settings_ui(void) {
              plan_labels[g_selected_plan],
              view_labels[g_selected_view]);
     lv_label_set_text(lbl_settings_status, tmp);
+}
+
+/* ============================================================
+ * UPDATE WIFI UI
+ * ============================================================ */
+static void update_wifi_ui(void) {
+    switch (g_wifi_ui_state) {
+        case WIFI_STATE_CONNECTED:
+            lv_label_set_text(lbl_wifi_state, "Connected");
+            lv_obj_set_style_text_color(lbl_wifi_state, CM_GREEN, 0);
+            lv_label_set_text(lbl_wifi_ssid_val, g_wifi_ui_ssid[0] ? g_wifi_ui_ssid : "--");
+            lv_label_set_text(lbl_wifi_ip_val,   g_wifi_ui_ip[0]   ? g_wifi_ui_ip   : "--");
+            lv_label_set_text(lbl_btn_wifi_action, "Setup WiFi");
+            lv_label_set_text(lbl_wifi_hint1, "1. Press button to reconfigure");
+            lv_label_set_text(lbl_wifi_hint2, "2. Connect to 'CYD-Setup' WiFi");
+            lv_label_set_text(lbl_wifi_hint3, "3. Open 192.168.4.1 in browser");
+            break;
+
+        case WIFI_STATE_AP_ACTIVE:
+            lv_label_set_text(lbl_wifi_state, "Setup mode active");
+            lv_obj_set_style_text_color(lbl_wifi_state, CM_YELLOW, 0);
+            lv_label_set_text(lbl_wifi_ssid_val, "CYD-Setup");
+            lv_label_set_text(lbl_wifi_ip_val,   "192.168.4.1");
+            lv_label_set_text(lbl_btn_wifi_action, "Cancel");
+            lv_label_set_text(lbl_wifi_hint1, "1. Connect to 'CYD-Setup' WiFi");
+            lv_label_set_text(lbl_wifi_hint2, "2. Open 192.168.4.1 in browser");
+            lv_label_set_text(lbl_wifi_hint3, "3. Enter SSID + password, save");
+            break;
+
+        case WIFI_STATE_DISCONNECTED:
+        default:
+            lv_label_set_text(lbl_wifi_state, "Not connected");
+            lv_obj_set_style_text_color(lbl_wifi_state, CM_RED, 0);
+            lv_label_set_text(lbl_wifi_ssid_val, "--");
+            lv_label_set_text(lbl_wifi_ip_val,   "--");
+            lv_label_set_text(lbl_btn_wifi_action, "Setup WiFi");
+            lv_label_set_text(lbl_wifi_hint1, "1. Press button above");
+            lv_label_set_text(lbl_wifi_hint2, "2. Connect to 'CYD-Setup' WiFi");
+            lv_label_set_text(lbl_wifi_hint3, "3. Open 192.168.4.1 in browser");
+            break;
+    }
 }
 
 /* ============================================================
@@ -375,32 +402,18 @@ static void update_ui(void) {
     lv_label_set_text(lbl_depletion, tmp);
 }
 
-static void update_windows_ui(void) {
-    char tmp[32];
-    snprintf(tmp, sizeof(tmp), "CLI Windows (%d)", g_window_count);
-    lv_label_set_text(lbl_win_header, tmp);
-    for (int i = 0; i < MAX_WINDOWS; i++) {
-        if (i < g_window_count) {
-            lv_label_set_text(win_labels[i], g_windows[i].name);
-            lv_obj_remove_flag(win_buttons[i], LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(win_buttons[i], LV_OBJ_FLAG_HIDDEN);
-        }
-    }
-}
-
 /* ============================================================
  * TAB & SCREEN SWITCHING
  * ============================================================ */
 static void switch_to_screen(int idx);
 
-static void tab_monitor_cb(lv_event_t *e) { (void)e; switch_to_screen(0); }
-static void tab_windows_cb(lv_event_t *e) { (void)e; switch_to_screen(1); }
-static void tab_settings_cb(lv_event_t *e) { (void)e; switch_to_screen(2); }
+static void tab_monitor_cb(lv_event_t *e)  { (void)e; switch_to_screen(0); }
+static void tab_settings_cb(lv_event_t *e) { (void)e; switch_to_screen(1); }
+static void tab_wifi_cb(lv_event_t *e)     { (void)e; switch_to_screen(2); }
 
 static void switch_to_screen(int idx) {
     if (idx == current_screen) return;
-    lv_obj_t *targets[] = { scr_monitor, scr_windows, scr_settings };
+    lv_obj_t *targets[] = { scr_monitor, scr_settings, scr_wifi };
     lv_scr_load_anim_t anim = (idx > current_screen)
         ? LV_SCR_LOAD_ANIM_MOVE_LEFT
         : LV_SCR_LOAD_ANIM_MOVE_RIGHT;
@@ -411,15 +424,6 @@ static void switch_to_screen(int idx) {
 /* ============================================================
  * BUTTON CALLBACKS
  * ============================================================ */
-static void win_btn_click_cb(lv_event_t *e) {
-    int idx = (int)(intptr_t)lv_event_get_user_data(e);
-    if (idx >= 0 && idx < g_window_count) {
-        char cmd[64];
-        snprintf(cmd, sizeof(cmd), "{\"switch\":%d}\n", (int)g_windows[idx].hwnd);
-        SERIAL_PRINTF("%s", cmd);
-    }
-}
-
 static void plan_btn_cb(lv_event_t *e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     if (idx >= 0 && idx < NUM_PLANS && idx != g_selected_plan) {
@@ -435,6 +439,15 @@ static void view_btn_cb(lv_event_t *e) {
         g_selected_view = idx;
         update_settings_ui();
         send_config_to_bridge();
+    }
+}
+
+static void wifi_action_btn_cb(lv_event_t *e) {
+    (void)e;
+    if (g_wifi_ui_state == WIFI_STATE_AP_ACTIVE) {
+        g_cancel_ap_portal = true;
+    } else {
+        g_request_ap_portal = true;
     }
 }
 
@@ -516,7 +529,7 @@ static lv_obj_t* create_select_btn(lv_obj_t *parent, const char *label_text,
     return btn;
 }
 
-/* 3-tab bar */
+/* 3-tab bar: Monitor | Settings | WiFi */
 static void create_tab_bar_3(lv_obj_t *scr, int active_idx) {
     lv_obj_t *bg = lv_obj_create(scr);
     lv_obj_set_size(bg, 320, 24);
@@ -530,15 +543,18 @@ static void create_tab_bar_3(lv_obj_t *scr, int active_idx) {
 
     struct { const char *text; lv_event_cb_t cb; } tabs[] = {
         {"Monitor",  tab_monitor_cb},
-        {"Windows",  tab_windows_cb},
         {"Settings", tab_settings_cb},
+        {"WiFi",     tab_wifi_cb},
     };
 
-    int tab_w = 102;
+    int tab_w = 100;
+    int gap   = 4;
+    int start = (320 - (3 * tab_w + 2 * gap)) / 2;
+
     for (int i = 0; i < 3; i++) {
         lv_obj_t *btn = lv_btn_create(bg);
         lv_obj_set_size(btn, tab_w, 22);
-        lv_obj_set_pos(btn, 2 + i * (tab_w + 4), 1);
+        lv_obj_set_pos(btn, start + i * (tab_w + gap), 1);
         lv_obj_set_style_bg_color(btn, i == active_idx ? CM_TAB_ACTIVE : CM_TAB_INACTIVE, 0);
         lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
         lv_obj_set_style_radius(btn, 4, 0);
@@ -650,48 +666,6 @@ static void build_monitor_screen(lv_obj_t *scr) {
     create_tab_bar_3(scr, 0);
 }
 
-static void build_windows_screen(lv_obj_t *scr) {
-    lv_obj_set_style_bg_color(scr, CM_BG_DARK, 0);
-    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
-
-    lv_obj_t *wh = lv_obj_create(scr);
-    lv_obj_set_size(wh, 320, 26); lv_obj_set_pos(wh, 0, 0);
-    lv_obj_set_style_bg_color(wh, CM_HEADER_BG, 0); lv_obj_set_style_bg_opa(wh, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(wh, 0, 0); lv_obj_set_style_radius(wh, 0, 0);
-    lv_obj_set_style_pad_all(wh, 3, 0); lv_obj_set_scrollbar_mode(wh, LV_SCROLLBAR_MODE_OFF);
-
-    lbl_win_header = lv_label_create(wh);
-    lv_label_set_text(lbl_win_header, "CLI Windows (0)");
-    lv_obj_set_style_text_color(lbl_win_header, CM_TEXT_PRIM, 0);
-    lv_obj_set_style_text_font(lbl_win_header, &lv_font_montserrat_10, 0);
-    lv_obj_align(lbl_win_header, LV_ALIGN_LEFT_MID, 8, 0);
-
-    for (int i = 0; i < MAX_WINDOWS; i++) {
-        int col = i % 2, row = i / 2;
-        int x = 8 + col * 152, y = 30 + row * 40;
-
-        win_buttons[i] = lv_btn_create(scr);
-        lv_obj_set_size(win_buttons[i], 148, 36); lv_obj_set_pos(win_buttons[i], x, y);
-        lv_obj_set_style_bg_color(win_buttons[i], CM_BTN_BG, 0);
-        lv_obj_set_style_bg_opa(win_buttons[i], LV_OPA_COVER, 0);
-        lv_obj_set_style_bg_color(win_buttons[i], CM_BTN_PRESSED, LV_STATE_PRESSED);
-        lv_obj_set_style_radius(win_buttons[i], 6, 0);
-        lv_obj_set_style_border_width(win_buttons[i], 1, 0);
-        lv_obj_set_style_border_color(win_buttons[i], CM_DIVIDER, 0);
-        lv_obj_set_style_border_color(win_buttons[i], CM_TAB_ACTIVE, LV_STATE_PRESSED);
-        lv_obj_add_event_cb(win_buttons[i], win_btn_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
-        lv_obj_add_flag(win_buttons[i], LV_OBJ_FLAG_HIDDEN);
-
-        win_labels[i] = lv_label_create(win_buttons[i]);
-        lv_label_set_text(win_labels[i], "");
-        lv_obj_set_style_text_color(win_labels[i], CM_TEXT_PRIM, 0);
-        lv_obj_set_style_text_font(win_labels[i], &lv_font_montserrat_10, 0);
-        lv_obj_align(win_labels[i], LV_ALIGN_CENTER, 0, 0);
-    }
-
-    create_tab_bar_3(scr, 1);
-}
-
 static void build_settings_screen(lv_obj_t *scr) {
     lv_obj_set_style_bg_color(scr, CM_BG_DARK, 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
@@ -762,6 +736,111 @@ static void build_settings_screen(lv_obj_t *scr) {
     create_tab_bar_3(scr, 2);
 }
 
+static void build_wifi_screen(lv_obj_t *scr) {
+    lv_obj_set_style_bg_color(scr, CM_BG_DARK, 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+
+    /* Header */
+    lv_obj_t *hdr = lv_obj_create(scr);
+    lv_obj_set_size(hdr, 320, 26); lv_obj_set_pos(hdr, 0, 0);
+    lv_obj_set_style_bg_color(hdr, CM_HEADER_BG, 0); lv_obj_set_style_bg_opa(hdr, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(hdr, 0, 0); lv_obj_set_style_radius(hdr, 0, 0);
+    lv_obj_set_style_pad_all(hdr, 3, 0); lv_obj_set_scrollbar_mode(hdr, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t *ht = lv_label_create(hdr);
+    lv_label_set_text(ht, "WiFi");
+    lv_obj_set_style_text_color(ht, CM_TEXT_PRIM, 0);
+    lv_obj_set_style_text_font(ht, &lv_font_montserrat_12, 0);
+    lv_obj_align(ht, LV_ALIGN_LEFT_MID, 8, 0);
+
+    /* Status row: dot + state label */
+    lv_obj_t *dot = lv_obj_create(scr);
+    lv_obj_set_size(dot, 8, 8); lv_obj_set_pos(dot, 10, 38);
+    lv_obj_set_style_bg_color(dot, CM_TEXT_DIM, 0);
+    lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(dot, 0, 0);
+
+    lbl_wifi_state = lv_label_create(scr);
+    lv_label_set_text(lbl_wifi_state, "Not connected");
+    lv_obj_set_style_text_color(lbl_wifi_state, CM_RED, 0);
+    lv_obj_set_style_text_font(lbl_wifi_state, &lv_font_montserrat_10, 0);
+    lv_obj_set_pos(lbl_wifi_state, 24, 36);
+
+    /* SSID row */
+    lv_obj_t *ssid_lbl = lv_label_create(scr);
+    lv_label_set_text(ssid_lbl, "SSID:");
+    lv_obj_set_style_text_color(ssid_lbl, CM_TEXT_SEC, 0);
+    lv_obj_set_style_text_font(ssid_lbl, &lv_font_montserrat_10, 0);
+    lv_obj_set_pos(ssid_lbl, 10, 54);
+
+    lbl_wifi_ssid_val = lv_label_create(scr);
+    lv_label_set_text(lbl_wifi_ssid_val, "--");
+    lv_obj_set_style_text_color(lbl_wifi_ssid_val, CM_TEXT_PRIM, 0);
+    lv_obj_set_style_text_font(lbl_wifi_ssid_val, &lv_font_montserrat_10, 0);
+    lv_obj_set_pos(lbl_wifi_ssid_val, 48, 54);
+
+    /* IP row */
+    lv_obj_t *ip_lbl = lv_label_create(scr);
+    lv_label_set_text(ip_lbl, "IP:");
+    lv_obj_set_style_text_color(ip_lbl, CM_TEXT_SEC, 0);
+    lv_obj_set_style_text_font(ip_lbl, &lv_font_montserrat_10, 0);
+    lv_obj_set_pos(ip_lbl, 10, 70);
+
+    lbl_wifi_ip_val = lv_label_create(scr);
+    lv_label_set_text(lbl_wifi_ip_val, "--");
+    lv_obj_set_style_text_color(lbl_wifi_ip_val, CM_TEXT_PRIM, 0);
+    lv_obj_set_style_text_font(lbl_wifi_ip_val, &lv_font_montserrat_10, 0);
+    lv_obj_set_pos(lbl_wifi_ip_val, 48, 70);
+
+    /* Divider */
+    create_divider(scr, 90);
+
+    /* Action button — 300px wide, centered in 320px screen */
+    btn_wifi_action = lv_btn_create(scr);
+    lv_obj_set_size(btn_wifi_action, 300, 36);
+    lv_obj_set_pos(btn_wifi_action, 10, 96);
+    lv_obj_set_style_bg_color(btn_wifi_action, CM_BTN_BG, 0);
+    lv_obj_set_style_bg_opa(btn_wifi_action, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(btn_wifi_action, CM_BTN_PRESSED, LV_STATE_PRESSED);
+    lv_obj_set_style_radius(btn_wifi_action, 6, 0);
+    lv_obj_set_style_border_width(btn_wifi_action, 2, 0);
+    lv_obj_set_style_border_color(btn_wifi_action, CM_TAB_ACTIVE, 0);
+    lv_obj_set_style_pad_all(btn_wifi_action, 0, 0);
+    lv_obj_add_event_cb(btn_wifi_action, wifi_action_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    lbl_btn_wifi_action = lv_label_create(btn_wifi_action);
+    lv_label_set_text(lbl_btn_wifi_action, "Setup WiFi");
+    lv_obj_set_style_text_color(lbl_btn_wifi_action, CM_TEXT_PRIM, 0);
+    lv_obj_set_style_text_font(lbl_btn_wifi_action, &lv_font_montserrat_10, 0);
+    lv_obj_align(lbl_btn_wifi_action, LV_ALIGN_CENTER, 0, 0);
+
+    /* Divider */
+    create_divider(scr, 140);
+
+    /* Hint lines */
+    lbl_wifi_hint1 = lv_label_create(scr);
+    lv_label_set_text(lbl_wifi_hint1, "1. Press button above");
+    lv_obj_set_style_text_color(lbl_wifi_hint1, CM_TEXT_DIM, 0);
+    lv_obj_set_style_text_font(lbl_wifi_hint1, &lv_font_montserrat_10, 0);
+    lv_obj_set_pos(lbl_wifi_hint1, 10, 148);
+
+    lbl_wifi_hint2 = lv_label_create(scr);
+    lv_label_set_text(lbl_wifi_hint2, "2. Connect to 'CYD-Setup' WiFi");
+    lv_obj_set_style_text_color(lbl_wifi_hint2, CM_TEXT_DIM, 0);
+    lv_obj_set_style_text_font(lbl_wifi_hint2, &lv_font_montserrat_10, 0);
+    lv_obj_set_pos(lbl_wifi_hint2, 10, 162);
+
+    lbl_wifi_hint3 = lv_label_create(scr);
+    lv_label_set_text(lbl_wifi_hint3, "3. Open 192.168.4.1 in browser");
+    lv_obj_set_style_text_color(lbl_wifi_hint3, CM_TEXT_DIM, 0);
+    lv_obj_set_style_text_font(lbl_wifi_hint3, &lv_font_montserrat_10, 0);
+    lv_obj_set_pos(lbl_wifi_hint3, 10, 176);
+
+    /* Tab bar — active tab = 2 (WiFi) */
+    create_tab_bar_3(scr, 2);
+}
+
 /* ============================================================
  * PC TIMER
  * ============================================================ */
@@ -780,14 +859,15 @@ static void claude_monitor_create_ui(void) {
     scr_monitor = lv_screen_active();
     build_monitor_screen(scr_monitor);
 
-    scr_windows = lv_obj_create(NULL);
-    build_windows_screen(scr_windows);
-
     scr_settings = lv_obj_create(NULL);
     build_settings_screen(scr_settings);
 
+    scr_wifi = lv_obj_create(NULL);
+    build_wifi_screen(scr_wifi);
+
     current_screen = 0;
     update_settings_ui();
+    update_wifi_ui();
 
 #ifndef ESP32
     lv_timer_create(data_poll_cb, 2000, NULL);
