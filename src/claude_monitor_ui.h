@@ -439,11 +439,7 @@ static void update_wifi_ui(void) {
 static void update_ui(void) {
     char tmp[48];
 
-    /* Accent stripe color = warning level */
-    lv_color_t dot_col = g_data.warning_level == 0 ? CM_ACCENT :
-                         g_data.warning_level == 1 ? CM_YELLOW :
-                         g_data.warning_level == 2 ? CM_ORANGE : CM_RED;
-    lv_obj_set_style_bg_color(accent_bar, dot_col, 0);
+    /* Accent stripe — reserved for air-raid alert status (TODO: wire up when token arrives) */
 
     /* Session percentage */
     int sess_pct = (g_data.session_total_min > 0)
@@ -562,11 +558,11 @@ static void build_monitor_screen(lv_obj_t *scr) {
     lv_obj_set_width(lbl_weather_cond, 114);
     lv_obj_set_style_text_align(lbl_weather_cond, LV_TEXT_ALIGN_RIGHT, 0);
 
-    /* ── Accent stripe (y=70..73) ── */
+    /* ── Alert stripe (y=70..73) — green=safe, red=alert ── */
     accent_bar = lv_obj_create(scr);
     lv_obj_set_size(accent_bar, 240, 3);
     lv_obj_set_pos(accent_bar, 0, 70);
-    lv_obj_set_style_bg_color(accent_bar, CM_ACCENT, 0);
+    lv_obj_set_style_bg_color(accent_bar, CM_DIVIDER, 0);
     lv_obj_set_style_bg_opa(accent_bar, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(accent_bar, 0, 0);
     lv_obj_set_style_radius(accent_bar, 0, 0);
