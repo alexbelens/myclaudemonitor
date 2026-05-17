@@ -1,13 +1,8 @@
 /**
- * claude_monitor_ui.h
+ * claude_monitor_ui.h — Portrait 240×320 dashboard
  *
- * Claude Monitor CYD — Three-screen dashboard
- *
- * Screen 0: Monitor  — real-time usage metrics
- * Screen 1: Settings — plan + view mode selection (stored in NVS)
- * Screen 2: WiFi     — connect / AP captive portal setup
- *
- * Tab bar at bottom: [Monitor] [Settings] [WiFi]
+ * Screen 0: Monitor  — clock, weather+icon, reset countdown, session, tokens
+ * Screen 1: Settings — WiFi setup + timezone
  */
 
 #ifndef CLAUDE_MONITOR_UI_H
@@ -18,7 +13,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Serial output (CYD -> PC) */
 #ifdef ESP32
 #include <Arduino.h>
 #define SERIAL_PRINTF(...) Serial.printf(__VA_ARGS__)
@@ -27,55 +21,45 @@
 #endif
 
 /* ============================================================
- * DATA MODELS
+ * DATA MODEL
  * ============================================================ */
-
 typedef struct {
     int32_t tokens_used;
     int32_t tokens_limit;
-    float cost_used;
-    float cost_limit;
+    float   cost_used;
+    float   cost_limit;
     int32_t msgs_used;
     int32_t msgs_limit;
-    float burn_rate;
-    float cost_rate;
+    float   burn_rate;
+    float   cost_rate;
     int32_t depletion_min;
     int32_t reset_min;
     int32_t session_elapsed_min;
     int32_t session_total_min;
-    char plan_name[16];
-    char model[16];
+    char    plan_name[16];
+    char    model[16];
     int32_t model_pct;
     int32_t warning_level;
 } claude_data_t;
 
 static claude_data_t g_data = {
     0, 66593, 0.0f, 147.0f, 0, 260, 0.0f, 0.0f,
-    999, 300, 0, 300, "Custom", "--", 0, 0,
+    999, 300, 0, 300, "Pro", "--", 0, 0,
 };
 
-/* Settings config */
-#define NUM_PLANS 4
-#define NUM_VIEWS 3
-
-static const char *plan_names[NUM_PLANS] = {"custom", "pro", "max5", "max20"};
-static const char *plan_labels[NUM_PLANS] = {"Custom", "Pro", "Max5", "Max20"};
-static const char *view_names[NUM_VIEWS] = {"realtime", "daily", "monthly"};
-static const char *view_labels[NUM_VIEWS] = {"Realtime", "Daily", "Monthly"};
-
-static int g_selected_plan = 0;   /* 0=custom, 1=pro, 2=max5, 3=max20 */
-static int g_selected_view = 0;   /* 0=realtime, 1=daily, 2=monthly */
-
 /* ============================================================
- * WIFI UI STATE (shared with main.cpp)
+ * SHARED STATE (read/written by main.cpp)
  * ============================================================ */
+static char g_weather_str[48] = "--";   /* raw from fetch: "Partly cloudy +15°C" */
+static int  g_tz_offset       = 3;
+static int  g_tz_change       = 0;
 
-typedef enum {
-    WIFI_STATE_DISCONNECTED,
-    WIFI_STATE_CONNECTED,
-    WIFI_STATE_AP_ACTIVE
-} wifi_ui_state_t;
+/* Parsed weather (filled by update_weather_display) */
+static char g_weather_temp[16] = "--";
+static char g_weather_cond[32] = "--";
 
+/* WiFi provisioning */
+typedef enum { WIFI_STATE_DISCONNECTED, WIFI_STATE_CONNECTED, WIFI_STATE_AP_ACTIVE } wifi_ui_state_t;
 static wifi_ui_state_t g_wifi_ui_state = WIFI_STATE_DISCONNECTED;
 static char g_wifi_ui_ssid[64] = {0};
 static char g_wifi_ui_ip[32]   = {0};
@@ -83,212 +67,346 @@ static bool g_request_ap_portal = false;
 static bool g_cancel_ap_portal  = false;
 
 /* ============================================================
- * THEME COLORS
+ * COLORS — Dark Navy + Electric Cyan
  * ============================================================ */
-#define CM_BG_DARK      lv_color_hex(0x1A1A2E)
-#define CM_BG_CARD      lv_color_hex(0x16213E)
-#define CM_HEADER_BG    lv_color_hex(0x0F3460)
-#define CM_GREEN        lv_color_hex(0x06D6A0)
-#define CM_YELLOW       lv_color_hex(0xFFD166)
-#define CM_ORANGE       lv_color_hex(0xF77F00)
-#define CM_RED          lv_color_hex(0xD62828)
-#define CM_BLUE         lv_color_hex(0x00B4D8)
-#define CM_PURPLE       lv_color_hex(0x7209B7)
-#define CM_MODEL_COLOR  lv_color_hex(0xFFD166)
-#define CM_TEXT_PRIM    lv_color_hex(0xE0E0E0)
-#define CM_TEXT_SEC     lv_color_hex(0x9E9E9E)
-#define CM_TEXT_DIM     lv_color_hex(0x616161)
-#define CM_BAR_BG      lv_color_hex(0x2A2A40)
-#define CM_DIVIDER     lv_color_hex(0x2A2A40)
-#define CM_TAB_ACTIVE  lv_color_hex(0x00B4D8)
-#define CM_TAB_INACTIVE lv_color_hex(0x2A2A40)
-#define CM_BTN_BG      lv_color_hex(0x16213E)
-#define CM_BTN_PRESSED lv_color_hex(0x0F3460)
-#define CM_BTN_SELECTED lv_color_hex(0x00B4D8)
+#define CM_BG          lv_color_hex(0x080818)
+#define CM_SURFACE     lv_color_hex(0x0F0F28)
+#define CM_HEADER_BG   lv_color_hex(0x0A0A20)
+#define CM_ACCENT      lv_color_hex(0x00C8FF)
+#define CM_GREEN       lv_color_hex(0x00FF88)
+#define CM_YELLOW      lv_color_hex(0xFFCC00)
+#define CM_ORANGE      lv_color_hex(0xFF7700)
+#define CM_RED         lv_color_hex(0xFF2255)
+#define CM_TEXT_PRIM   lv_color_hex(0xEEEEFF)
+#define CM_TEXT_SEC    lv_color_hex(0x5555AA)
+#define CM_TEXT_DIM    lv_color_hex(0x28285A)
+#define CM_BAR_BG      lv_color_hex(0x14143A)
+#define CM_DIVIDER     lv_color_hex(0x18183A)
+#define CM_TAB_ACTIVE  lv_color_hex(0x00C8FF)
+#define CM_TAB_BG      lv_color_hex(0x0A0A20)
+#define CM_BTN_BG      lv_color_hex(0x0F0F28)
+#define CM_BTN_PRESS   lv_color_hex(0x1A1A40)
 
 /* ============================================================
- * SCREENS
+ * SCREENS & WIDGETS
  * ============================================================ */
 static lv_obj_t *scr_monitor;
 static lv_obj_t *scr_settings;
-static lv_obj_t *scr_wifi;
-static int current_screen = 0;  /* 0=monitor, 1=settings, 2=wifi */
+static int current_screen = 0;
 
-/* Monitor widgets */
-static lv_obj_t *status_led, *lbl_plan, *lbl_reset_time;
-static lv_obj_t *bar_cost, *lbl_cost_pct, *lbl_cost_detail;
-static lv_obj_t *bar_tokens, *lbl_tokens_pct, *lbl_tokens_detail;
-static lv_obj_t *bar_msgs, *lbl_msgs_pct, *lbl_msgs_detail;
-static lv_obj_t *lbl_burn, *lbl_cost_rate, *lbl_model, *lbl_reset, *lbl_depletion;
+/* Monitor */
+static lv_obj_t *status_dot;
+static lv_obj_t *lbl_clock;
+static lv_obj_t *lbl_date;
+static lv_obj_t *lbl_weather_temp;
+static lv_obj_t *lbl_weather_cond;
+static lv_obj_t *accent_bar;
+/* Session mode (sess_pct < 100) */
+static lv_obj_t *lbl_sess_label;
+static lv_obj_t *lbl_session_pct;
+static lv_obj_t *bar_session;
+static lv_obj_t *lbl_time_remain;
+/* Reset mode (sess_pct >= 100) */
+static lv_obj_t *lbl_reset_in;
+static lv_obj_t *lbl_countdown;
+static lv_obj_t *lbl_tokens;
+static lv_obj_t *lbl_model;
+static lv_obj_t *lbl_msgs;
 
-/* Settings widgets */
-static lv_obj_t *plan_btns[NUM_PLANS];
-static lv_obj_t *view_btns[NUM_VIEWS];
-static lv_obj_t *lbl_settings_status;
-
-/* WiFi screen widgets */
+/* Settings */
 static lv_obj_t *lbl_wifi_state;
 static lv_obj_t *lbl_wifi_ssid_val;
 static lv_obj_t *lbl_wifi_ip_val;
 static lv_obj_t *btn_wifi_action;
 static lv_obj_t *lbl_btn_wifi_action;
-static lv_obj_t *lbl_wifi_hint1;
-static lv_obj_t *lbl_wifi_hint2;
-static lv_obj_t *lbl_wifi_hint3;
+static lv_obj_t *lbl_tz;
 
 /* ============================================================
  * HELPERS
  * ============================================================ */
-static lv_color_t warning_color(int pct) {
+static lv_color_t pct_color(int pct) {
     if (pct >= 90) return CM_RED;
     if (pct >= 75) return CM_ORANGE;
     if (pct >= 50) return CM_YELLOW;
     return CM_GREEN;
 }
 
-static void format_time(int minutes, char *buf, size_t len) {
-    int h = minutes / 60;
-    int m = minutes % 60;
-    if (h > 0) snprintf(buf, len, "%dh %02dm", h, m);
-    else snprintf(buf, len, "%dm", m);
+static lv_color_t warning_bar_color(int pct) {
+    if (pct >= 90) return CM_RED;
+    if (pct >= 75) return CM_ORANGE;
+    if (pct >= 50) return CM_YELLOW;
+    return CM_ACCENT;
 }
 
-static void format_number_short(int32_t n, char *buf, size_t len) {
-    if (n >= 100000) snprintf(buf, len, "%dk", n / 1000);
-    else if (n >= 1000) snprintf(buf, len, "%d,%03d", n / 1000, n % 1000);
-    else snprintf(buf, len, "%d", n);
+static void fmt_time(int minutes, char *buf, size_t len) {
+    int h = minutes / 60, m = minutes % 60;
+    if (h > 0) snprintf(buf, len, "%dh %02dm", h, m);
+    else        snprintf(buf, len, "%dm", m);
+}
+
+static void fmt_tokens(int32_t n, char *buf, size_t len) {
+    if (n < 1000)
+        snprintf(buf, len, "%d", (int)n);
+    else if (n < 1000000)
+        snprintf(buf, len, "%d,%03d", (int)(n/1000), (int)(n%1000));
+    else
+        snprintf(buf, len, "%dM", (int)(n/1000000));
+}
+
+/* ============================================================
+ * WEATHER PARSING — split "Partly cloudy +15°C" into cond + temp
+ * ============================================================ */
+static void parse_weather_str(const char *raw) {
+    /* Find last space before a +/- sign or digit = start of temperature */
+    const char *last_sp = NULL;
+    for (const char *p = raw; *p; p++) {
+        if (*p == ' ') {
+            char next = *(p + 1);
+            if (next == '+' || next == '-' ||
+                (next >= '0' && next <= '9')) {
+                last_sp = p;
+            }
+        }
+    }
+    if (last_sp && last_sp > raw) {
+        size_t clen = (size_t)(last_sp - raw);
+        if (clen >= sizeof(g_weather_cond)) clen = sizeof(g_weather_cond) - 1;
+        memcpy(g_weather_cond, raw, clen);
+        g_weather_cond[clen] = '\0';
+        strncpy(g_weather_temp, last_sp + 1, sizeof(g_weather_temp) - 1);
+        g_weather_temp[sizeof(g_weather_temp)-1] = '\0';
+    } else {
+        strncpy(g_weather_cond, raw, sizeof(g_weather_cond) - 1);
+        strncpy(g_weather_temp, "--", sizeof(g_weather_temp) - 1);
+    }
 }
 
 /* ============================================================
  * JSON MINI-PARSER
  * ============================================================ */
-static const char* json_find_key(const char *json, const char *key) {
-    char search[64];
-    snprintf(search, sizeof(search), "\"%s\"", key);
-    const char *p = strstr(json, search);
+static const char* jfind(const char *json, const char *key) {
+    char s[64]; snprintf(s, sizeof(s), "\"%s\"", key);
+    const char *p = strstr(json, s);
     if (!p) return NULL;
-    p = strchr(p, ':');
-    if (!p) return NULL;
-    p++;
-    while (*p == ' ' || *p == '\t') p++;
+    p = strchr(p, ':'); if (!p) return NULL;
+    p++; while (*p == ' ' || *p == '\t') p++;
     return p;
 }
-
-static int json_get_int(const char *json, const char *key, int def) {
-    const char *v = json_find_key(json, key);
-    return v ? atoi(v) : def;
-}
-
-static float json_get_float(const char *json, const char *key, float def) {
-    const char *v = json_find_key(json, key);
-    return v ? (float)atof(v) : def;
-}
-
-static void json_get_str(const char *json, const char *key, char *out, size_t len, const char *def) {
-    const char *v = json_find_key(json, key);
-    if (!v || *v != '"') { strncpy(out, def, len); return; }
-    v++;
-    size_t i = 0;
-    while (*v && *v != '"' && i < len - 1) { out[i++] = *v++; }
-    out[i] = '\0';
+static int   jint(const char *j, const char *k, int d)   { const char *v=jfind(j,k); return v?atoi(v):d; }
+static float jflt(const char *j, const char *k, float d) { const char *v=jfind(j,k); return v?(float)atof(v):d; }
+static void  jstr(const char *j, const char *k, char *o, size_t l, const char *d) {
+    const char *v = jfind(j, k);
+    if (!v || *v != '"') { strncpy(o, d, l); return; }
+    v++; size_t i=0; while (*v && *v!='"' && i<l-1) o[i++]=*v++; o[i]='\0';
 }
 
 /* ============================================================
  * DATA LOADING
  * ============================================================ */
 static void load_data_from_json(const char *buf) {
-    g_data.tokens_used   = json_get_int(buf, "tokens_used", g_data.tokens_used);
-    g_data.tokens_limit  = json_get_int(buf, "tokens_limit", g_data.tokens_limit);
-    g_data.cost_used     = json_get_float(buf, "cost_used", g_data.cost_used);
-    g_data.cost_limit    = json_get_float(buf, "cost_limit", g_data.cost_limit);
-    g_data.msgs_used     = json_get_int(buf, "msgs_used", g_data.msgs_used);
-    g_data.msgs_limit    = json_get_int(buf, "msgs_limit", g_data.msgs_limit);
-    g_data.burn_rate     = json_get_float(buf, "burn_rate", g_data.burn_rate);
-    g_data.cost_rate     = json_get_float(buf, "cost_rate", g_data.cost_rate);
-    g_data.depletion_min = json_get_int(buf, "depletion_min", g_data.depletion_min);
-    g_data.reset_min     = json_get_int(buf, "reset_min", g_data.reset_min);
-    g_data.session_elapsed_min = json_get_int(buf, "session_elapsed_min", g_data.session_elapsed_min);
-    g_data.session_total_min   = json_get_int(buf, "session_total_min", g_data.session_total_min);
-    g_data.warning_level = json_get_int(buf, "warning_level", g_data.warning_level);
-    g_data.model_pct     = json_get_int(buf, "model_pct", g_data.model_pct);
-    json_get_str(buf, "plan_name", g_data.plan_name, sizeof(g_data.plan_name), g_data.plan_name);
-    json_get_str(buf, "model", g_data.model, sizeof(g_data.model), g_data.model);
+    g_data.tokens_used         = jint(buf, "tokens_used",         g_data.tokens_used);
+    g_data.tokens_limit        = jint(buf, "tokens_limit",        g_data.tokens_limit);
+    g_data.cost_used           = jflt(buf, "cost_used",           g_data.cost_used);
+    g_data.cost_limit          = jflt(buf, "cost_limit",          g_data.cost_limit);
+    g_data.msgs_used           = jint(buf, "msgs_used",           g_data.msgs_used);
+    g_data.msgs_limit          = jint(buf, "msgs_limit",          g_data.msgs_limit);
+    g_data.burn_rate           = jflt(buf, "burn_rate",           g_data.burn_rate);
+    g_data.cost_rate           = jflt(buf, "cost_rate",           g_data.cost_rate);
+    g_data.depletion_min       = jint(buf, "depletion_min",       g_data.depletion_min);
+    g_data.reset_min           = jint(buf, "reset_min",           g_data.reset_min);
+    g_data.session_elapsed_min = jint(buf, "session_elapsed_min", g_data.session_elapsed_min);
+    g_data.session_total_min   = jint(buf, "session_total_min",   g_data.session_total_min);
+    g_data.warning_level       = jint(buf, "warning_level",       g_data.warning_level);
+    g_data.model_pct           = jint(buf, "model_pct",           g_data.model_pct);
+    jstr(buf, "plan_name", g_data.plan_name, sizeof(g_data.plan_name), g_data.plan_name);
+    jstr(buf, "model",     g_data.model,     sizeof(g_data.model),     g_data.model);
 }
 
-/* PC file loading */
 #ifndef ESP32
-#ifdef _WIN32
-#include <windows.h>
-static char _data_file_path[MAX_PATH] = {0};
-static const char* get_data_file_path(void) {
-    if (_data_file_path[0] == '\0') {
-        char tmp[MAX_PATH];
-        GetTempPathA(MAX_PATH, tmp);
-        snprintf(_data_file_path, MAX_PATH, "%sclaude_monitor_data.json", tmp);
-    }
-    return _data_file_path;
-}
-#define DATA_FILE get_data_file_path()
-#else
 #define DATA_FILE "/tmp/claude_monitor_data.json"
-#endif
 static void load_data_from_file(void) {
-    FILE *f = fopen(DATA_FILE, "r");
-    if (!f) return;
-    char buf[1024];
-    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
-    fclose(f);
-    buf[n] = '\0';
-    load_data_from_json(buf);
+    FILE *f = fopen(DATA_FILE, "r"); if (!f) return;
+    char buf[1024]; size_t n = fread(buf, 1, sizeof(buf)-1, f); fclose(f);
+    buf[n]='\0'; load_data_from_json(buf);
 }
 #endif
 
 /* ============================================================
- * SEND CONFIG TO BRIDGE
+ * SCREEN SWITCHING
  * ============================================================ */
-static void send_config_to_bridge(void) {
-    char cmd[128];
-    snprintf(cmd, sizeof(cmd),
-             "{\"config\":{\"plan\":\"%s\",\"view\":\"%s\"}}\n",
-             plan_names[g_selected_plan],
-             view_names[g_selected_view]);
-    SERIAL_PRINTF("%s", cmd);
+static void switch_to_screen(int idx);
+static void tab_monitor_cb(lv_event_t *e)  { (void)e; switch_to_screen(0); }
+static void tab_settings_cb(lv_event_t *e) { (void)e; switch_to_screen(1); }
+
+static void switch_to_screen(int idx) {
+    if (idx == current_screen) return;
+    lv_obj_t *targets[] = { scr_monitor, scr_settings };
+    lv_scr_load_anim_t anim = (idx > current_screen)
+        ? LV_SCR_LOAD_ANIM_MOVE_LEFT : LV_SCR_LOAD_ANIM_MOVE_RIGHT;
+    current_screen = idx;
+    lv_scr_load_anim(targets[idx], anim, 200, 0, false);
 }
 
 /* ============================================================
- * UPDATE SETTINGS UI
+ * BUTTON CALLBACKS
  * ============================================================ */
-static void update_settings_ui(void) {
-    /* Highlight active plan button */
-    for (int i = 0; i < NUM_PLANS; i++) {
-        if (i == g_selected_plan) {
-            lv_obj_set_style_bg_color(plan_btns[i], CM_BTN_SELECTED, 0);
-            lv_obj_set_style_border_color(plan_btns[i], CM_BTN_SELECTED, 0);
-        } else {
-            lv_obj_set_style_bg_color(plan_btns[i], CM_BTN_BG, 0);
-            lv_obj_set_style_border_color(plan_btns[i], CM_DIVIDER, 0);
-        }
+static void wifi_action_btn_cb(lv_event_t *e) {
+    (void)e;
+    if (g_wifi_ui_state == WIFI_STATE_AP_ACTIVE) g_cancel_ap_portal = true;
+    else g_request_ap_portal = true;
+}
+static void tz_minus_cb(lv_event_t *e) { (void)e; g_tz_change = -1; }
+static void tz_plus_cb(lv_event_t *e)  { (void)e; g_tz_change = +1; }
+
+/* ============================================================
+ * WIDGET HELPERS
+ * ============================================================ */
+static lv_obj_t* make_bar(lv_obj_t *parent, lv_color_t color, int x, int y, int w, int h) {
+    lv_obj_t *bar = lv_bar_create(parent);
+    lv_obj_set_size(bar, w, h);
+    lv_obj_set_pos(bar, x, y);
+    lv_bar_set_range(bar, 0, 100);
+    lv_bar_set_value(bar, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(bar, CM_BAR_BG, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(bar, 6, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(bar, color, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(bar, 6, LV_PART_INDICATOR);
+    lv_obj_set_style_anim_duration(bar, 500, LV_PART_INDICATOR);
+    return bar;
+}
+
+static lv_obj_t* make_label(lv_obj_t *parent, const char *txt,
+                             const lv_font_t *font, lv_color_t color,
+                             int x, int y) {
+    lv_obj_t *l = lv_label_create(parent);
+    lv_label_set_text(l, txt);
+    lv_obj_set_style_text_font(l, font, 0);
+    lv_obj_set_style_text_color(l, color, 0);
+    lv_obj_set_pos(l, x, y);
+    return l;
+}
+
+static lv_obj_t* make_divider(lv_obj_t *parent, int y, lv_color_t color) {
+    lv_obj_t *d = lv_obj_create(parent);
+    lv_obj_set_size(d, 240, 1);
+    lv_obj_set_pos(d, 0, y);
+    lv_obj_set_style_bg_color(d, color, 0);
+    lv_obj_set_style_bg_opa(d, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(d, 0, 0);
+    lv_obj_set_style_radius(d, 0, 0);
+    lv_obj_set_scrollbar_mode(d, LV_SCROLLBAR_MODE_OFF);
+    return d;
+}
+
+static lv_obj_t* make_btn(lv_obj_t *parent, const char *txt,
+                           int x, int y, int w, int h,
+                           lv_event_cb_t cb, void *ud) {
+    lv_obj_t *btn = lv_btn_create(parent);
+    lv_obj_set_size(btn, w, h);
+    lv_obj_set_pos(btn, x, y);
+    lv_obj_set_style_bg_color(btn, CM_BTN_BG, 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(btn, CM_BTN_PRESS, LV_STATE_PRESSED);
+    lv_obj_set_style_radius(btn, 8, 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_style_border_color(btn, CM_ACCENT, 0);
+    lv_obj_set_style_border_opa(btn, LV_OPA_40, 0);
+    lv_obj_set_style_pad_all(btn, 0, 0);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, ud);
+    lv_obj_t *lbl = lv_label_create(btn);
+    lv_label_set_text(lbl, txt);
+    lv_obj_set_style_text_color(lbl, CM_TEXT_PRIM, 0);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+    lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 0);
+    return btn;
+}
+
+/* 2-tab bar at y=296 */
+static void create_tab_bar(lv_obj_t *scr, int active_idx) {
+    lv_obj_t *bg = lv_obj_create(scr);
+    lv_obj_set_size(bg, 240, 24);
+    lv_obj_set_pos(bg, 0, 296);
+    lv_obj_set_style_bg_color(bg, CM_TAB_BG, 0);
+    lv_obj_set_style_bg_opa(bg, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(bg, 0, 0);
+    lv_obj_set_style_radius(bg, 0, 0);
+    lv_obj_set_style_pad_all(bg, 0, 0);
+    lv_obj_set_scrollbar_mode(bg, LV_SCROLLBAR_MODE_OFF);
+
+    struct { const char *text; lv_event_cb_t cb; } tabs[] = {
+        { "Monitor",  tab_monitor_cb  },
+        { "Settings", tab_settings_cb },
+    };
+    int tab_w = 110, gap = 8;
+    int start = (240 - (2 * tab_w + gap)) / 2;
+
+    for (int i = 0; i < 2; i++) {
+        lv_obj_t *btn = lv_btn_create(bg);
+        lv_obj_set_size(btn, tab_w, 22);
+        lv_obj_set_pos(btn, start + i * (tab_w + gap), 1);
+        lv_obj_set_style_bg_color(btn, i == active_idx ? CM_TAB_ACTIVE : CM_DIVIDER, 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_border_width(btn, 0, 0);
+        lv_obj_set_style_pad_all(btn, 0, 0);
+        lv_obj_add_event_cb(btn, tabs[i].cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, tabs[i].text);
+        lv_obj_set_style_text_color(lbl, i == active_idx ? CM_BG : CM_TEXT_SEC, 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
+        lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 0);
     }
-    /* Highlight active view button */
-    for (int i = 0; i < NUM_VIEWS; i++) {
-        if (i == g_selected_view) {
-            lv_obj_set_style_bg_color(view_btns[i], CM_BTN_SELECTED, 0);
-            lv_obj_set_style_border_color(view_btns[i], CM_BTN_SELECTED, 0);
-        } else {
-            lv_obj_set_style_bg_color(view_btns[i], CM_BTN_BG, 0);
-            lv_obj_set_style_border_color(view_btns[i], CM_DIVIDER, 0);
-        }
-    }
-    /* Status line */
-    char tmp[64];
-    snprintf(tmp, sizeof(tmp), "Active: %s | %s",
-             plan_labels[g_selected_plan],
-             view_labels[g_selected_view]);
-    lv_label_set_text(lbl_settings_status, tmp);
 }
 
 /* ============================================================
- * UPDATE WIFI UI
+ * UPDATE: REALTIME — clock + date + countdown (called every second)
+ * ============================================================ */
+static void update_realtime_ui(const char *timebuf, const char *datebuf, int secs_left) {
+    lv_label_set_text(lbl_clock, timebuf);
+    if (datebuf && datebuf[0]) lv_label_set_text(lbl_date, datebuf);
+
+    if (secs_left <= 0) {
+        lv_label_set_text(lbl_countdown, "0:00:00");
+        lv_obj_set_style_text_color(lbl_countdown, CM_RED, 0);
+    } else {
+        int h = secs_left / 3600;
+        int m = (secs_left % 3600) / 60;
+        int s = secs_left % 60;
+        char buf[12];
+        snprintf(buf, sizeof(buf), "%d:%02d:%02d", h, m, s);
+        lv_label_set_text(lbl_countdown, buf);
+
+        lv_color_t col = secs_left < 900  ? CM_RED    :
+                         secs_left < 1800 ? CM_ORANGE :
+                         secs_left < 3600 ? CM_YELLOW : CM_ACCENT;
+        lv_obj_set_style_text_color(lbl_countdown, col, 0);
+    }
+}
+
+/* ============================================================
+ * UPDATE: WEATHER (called after fetch from main.cpp)
+ * ============================================================ */
+static void update_weather_display(const char *raw) {
+    strncpy(g_weather_str, raw, sizeof(g_weather_str) - 1);
+    parse_weather_str(raw);
+    lv_label_set_text(lbl_weather_temp, g_weather_temp);
+    lv_label_set_text(lbl_weather_cond, g_weather_cond);
+}
+
+/* ============================================================
+ * UPDATE: TIMEZONE DISPLAY
+ * ============================================================ */
+static void update_tz_display(void) {
+    char buf[16];
+    if (g_tz_offset >= 0) snprintf(buf, sizeof(buf), "UTC+%d", g_tz_offset);
+    else                   snprintf(buf, sizeof(buf), "UTC%d",  g_tz_offset);
+    lv_label_set_text(lbl_tz, buf);
+}
+
+/* ============================================================
+ * UPDATE: WIFI STATUS in Settings
  * ============================================================ */
 static void update_wifi_ui(void) {
     switch (g_wifi_ui_state) {
@@ -297,559 +415,354 @@ static void update_wifi_ui(void) {
             lv_obj_set_style_text_color(lbl_wifi_state, CM_GREEN, 0);
             lv_label_set_text(lbl_wifi_ssid_val, g_wifi_ui_ssid[0] ? g_wifi_ui_ssid : "--");
             lv_label_set_text(lbl_wifi_ip_val,   g_wifi_ui_ip[0]   ? g_wifi_ui_ip   : "--");
-            lv_label_set_text(lbl_btn_wifi_action, "Setup WiFi");
-            lv_label_set_text(lbl_wifi_hint1, "1. Press button to reconfigure");
-            lv_label_set_text(lbl_wifi_hint2, "2. Connect to 'CYD-Setup' WiFi");
-            lv_label_set_text(lbl_wifi_hint3, "3. Open 192.168.4.1 in browser");
+            lv_label_set_text(lbl_btn_wifi_action, "Reconfigure");
             break;
-
         case WIFI_STATE_AP_ACTIVE:
-            lv_label_set_text(lbl_wifi_state, "Setup mode active");
+            lv_label_set_text(lbl_wifi_state, "Setup active");
             lv_obj_set_style_text_color(lbl_wifi_state, CM_YELLOW, 0);
             lv_label_set_text(lbl_wifi_ssid_val, "CYD-Setup");
             lv_label_set_text(lbl_wifi_ip_val,   "192.168.4.1");
             lv_label_set_text(lbl_btn_wifi_action, "Cancel");
-            lv_label_set_text(lbl_wifi_hint1, "1. Connect to 'CYD-Setup' WiFi");
-            lv_label_set_text(lbl_wifi_hint2, "2. Open 192.168.4.1 in browser");
-            lv_label_set_text(lbl_wifi_hint3, "3. Enter SSID + password, save");
             break;
-
-        case WIFI_STATE_DISCONNECTED:
         default:
             lv_label_set_text(lbl_wifi_state, "Not connected");
             lv_obj_set_style_text_color(lbl_wifi_state, CM_RED, 0);
             lv_label_set_text(lbl_wifi_ssid_val, "--");
             lv_label_set_text(lbl_wifi_ip_val,   "--");
             lv_label_set_text(lbl_btn_wifi_action, "Setup WiFi");
-            lv_label_set_text(lbl_wifi_hint1, "1. Press button above");
-            lv_label_set_text(lbl_wifi_hint2, "2. Connect to 'CYD-Setup' WiFi");
-            lv_label_set_text(lbl_wifi_hint3, "3. Open 192.168.4.1 in browser");
             break;
     }
 }
 
 /* ============================================================
- * UI UPDATE — Monitor
+ * UPDATE: MONITOR DATA (called when bridge sends payload)
  * ============================================================ */
 static void update_ui(void) {
-    char tmp[64];
-    int pct;
+    char tmp[48];
 
-    lv_label_set_text(lbl_plan, g_data.plan_name);
-    char rs[32];
-    format_time(g_data.reset_min, rs, sizeof(rs));
-    lv_label_set_text(lbl_reset_time, rs);
+    /* Status dot */
+    lv_color_t dot_col = g_data.warning_level == 0 ? CM_GREEN  :
+                         g_data.warning_level == 1 ? CM_YELLOW :
+                         g_data.warning_level == 2 ? CM_ORANGE : CM_RED;
+    lv_obj_set_style_bg_color(status_dot, dot_col, 0);
+    lv_obj_set_style_bg_color(accent_bar, dot_col, 0);
 
-    switch (g_data.warning_level) {
-        case 0: lv_obj_set_style_bg_color(status_led, CM_GREEN, 0); break;
-        case 1: lv_obj_set_style_bg_color(status_led, CM_YELLOW, 0); break;
-        case 2: lv_obj_set_style_bg_color(status_led, CM_ORANGE, 0); break;
-        default: lv_obj_set_style_bg_color(status_led, CM_RED, 0); break;
+    /* Session percentage */
+    int sess_pct = (g_data.session_total_min > 0)
+        ? (int)((int64_t)g_data.session_elapsed_min * 100 / g_data.session_total_min) : 0;
+    if (sess_pct > 100) sess_pct = 100;
+
+    int rem_min = g_data.session_total_min - g_data.session_elapsed_min;
+    if (rem_min < 0) rem_min = 0;
+
+    if (sess_pct >= 100) {
+        /* ── RESET IN mode ── */
+        lv_obj_add_flag(lbl_sess_label,  LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(lbl_session_pct, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(bar_session,     LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(lbl_time_remain, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(lbl_reset_in,  LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(lbl_countdown, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        /* ── SESSION mode ── */
+        lv_obj_clear_flag(lbl_sess_label,  LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(lbl_session_pct, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(bar_session,     LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(lbl_time_remain, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(lbl_reset_in,  LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(lbl_countdown, LV_OBJ_FLAG_HIDDEN);
+
+        snprintf(tmp, sizeof(tmp), "%d%%", sess_pct);
+        lv_label_set_text(lbl_session_pct, tmp);
+
+        lv_bar_set_value(bar_session, sess_pct, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(bar_session, warning_bar_color(sess_pct), LV_PART_INDICATOR);
+
+        char remain[16];
+        fmt_time(rem_min, remain, sizeof(remain));
+        snprintf(tmp, sizeof(tmp), "%s left", remain);
+        lv_label_set_text(lbl_time_remain, tmp);
     }
 
-    pct = (g_data.cost_limit > 0.01f) ? (int)(g_data.cost_used * 100.0f / g_data.cost_limit) : 0;
-    if (pct > 100) pct = 100;
-    lv_bar_set_value(bar_cost, pct, LV_ANIM_ON);
-    lv_obj_set_style_bg_color(bar_cost, warning_color(pct), LV_PART_INDICATOR);
-    snprintf(tmp, sizeof(tmp), "%d%%", pct);
-    lv_label_set_text(lbl_cost_pct, tmp);
-    snprintf(tmp, sizeof(tmp), "$%.0f / $%.0f", g_data.cost_used, g_data.cost_limit);
-    lv_label_set_text(lbl_cost_detail, tmp);
+    /* Tokens — large number, section header provides context */
+    char tok_buf[16];
+    fmt_tokens(g_data.tokens_used, tok_buf, sizeof(tok_buf));
+    lv_label_set_text(lbl_tokens, tok_buf);
 
-    pct = (g_data.tokens_limit > 0) ? (int)((int64_t)g_data.tokens_used * 100 / g_data.tokens_limit) : 0;
-    if (pct > 100) pct = 100;
-    lv_bar_set_value(bar_tokens, pct, LV_ANIM_ON);
-    lv_obj_set_style_bg_color(bar_tokens, warning_color(pct), LV_PART_INDICATOR);
-    snprintf(tmp, sizeof(tmp), "%d%%", pct);
-    lv_label_set_text(lbl_tokens_pct, tmp);
-    char us[16], ls[16];
-    format_number_short(g_data.tokens_used, us, sizeof(us));
-    format_number_short(g_data.tokens_limit, ls, sizeof(ls));
-    snprintf(tmp, sizeof(tmp), "%s / %s", us, ls);
-    lv_label_set_text(lbl_tokens_detail, tmp);
-
-    pct = (g_data.msgs_limit > 0) ? (int)((int64_t)g_data.msgs_used * 100 / g_data.msgs_limit) : 0;
-    if (pct > 100) pct = 100;
-    lv_bar_set_value(bar_msgs, pct, LV_ANIM_ON);
-    lv_obj_set_style_bg_color(bar_msgs, warning_color(pct), LV_PART_INDICATOR);
-    snprintf(tmp, sizeof(tmp), "%d%%", pct);
-    lv_label_set_text(lbl_msgs_pct, tmp);
-    snprintf(tmp, sizeof(tmp), "%d / %d", g_data.msgs_used, g_data.msgs_limit);
-    lv_label_set_text(lbl_msgs_detail, tmp);
-
-    snprintf(tmp, sizeof(tmp), "%.1f t/m", g_data.burn_rate);
-    lv_label_set_text(lbl_burn, tmp);
-    snprintf(tmp, sizeof(tmp), "$%.2f/m", g_data.cost_rate);
-    lv_label_set_text(lbl_cost_rate, tmp);
-    snprintf(tmp, sizeof(tmp), "%s %d%%", g_data.model, g_data.model_pct);
+    /* Model */
+    snprintf(tmp, sizeof(tmp), "%s  %d%%", g_data.model, g_data.model_pct);
     lv_label_set_text(lbl_model, tmp);
-    char r2[32];
-    format_time(g_data.reset_min, r2, sizeof(r2));
-    snprintf(tmp, sizeof(tmp), "Reset: %s", r2);
-    lv_label_set_text(lbl_reset, tmp);
 
-    if (g_data.depletion_min < 999) {
-        char ds[32];
-        format_time(g_data.depletion_min, ds, sizeof(ds));
-        snprintf(tmp, sizeof(tmp), "Tokens deplete in %s", ds);
-        lv_obj_set_style_text_color(lbl_depletion,
-            g_data.depletion_min < 60 ? CM_RED :
-            g_data.depletion_min < 120 ? CM_ORANGE : CM_TEXT_SEC, 0);
-    } else {
-        snprintf(tmp, sizeof(tmp), "Active session | P90 limits");
-        lv_obj_set_style_text_color(lbl_depletion, CM_TEXT_DIM, 0);
-    }
-    lv_label_set_text(lbl_depletion, tmp);
+    /* Msgs + burn rate */
+    int mph = (g_data.session_elapsed_min > 0)
+        ? (g_data.msgs_used * 60 / g_data.session_elapsed_min) : 0;
+    snprintf(tmp, sizeof(tmp), "Msgs %d/%d   %d msg/h",
+             g_data.msgs_used, g_data.msgs_limit, mph);
+    lv_label_set_text(lbl_msgs, tmp);
 }
 
 /* ============================================================
- * TAB & SCREEN SWITCHING
+ * BUILD: MONITOR SCREEN
+ *
+ *  y=  0..70   Header: [dot] clock / date  |  temp / cond
+ *  y= 70..73   Accent stripe
+ *  y= 83..143  SESSION zone (shared, both modes end ~y=143)
+ *               SESSION: label+% / bar / "Xh left"
+ *               RESET IN: label / countdown (montserrat_28)
+ *  y=148       Divider
+ *  y=166       "TOKENS THIS SESSION"
+ *  y=183       Token count (montserrat_28, centered)
+ *  y=225       Divider
+ *  y=235       Model + pct
+ *  y=253       Msgs + burn
+ *  y=276       Divider
  * ============================================================ */
-static void switch_to_screen(int idx);
-
-static void tab_monitor_cb(lv_event_t *e)  { (void)e; switch_to_screen(0); }
-static void tab_settings_cb(lv_event_t *e) { (void)e; switch_to_screen(1); }
-static void tab_wifi_cb(lv_event_t *e)     { (void)e; switch_to_screen(2); }
-
-static void switch_to_screen(int idx) {
-    if (idx == current_screen) return;
-    lv_obj_t *targets[] = { scr_monitor, scr_settings, scr_wifi };
-    lv_scr_load_anim_t anim = (idx > current_screen)
-        ? LV_SCR_LOAD_ANIM_MOVE_LEFT
-        : LV_SCR_LOAD_ANIM_MOVE_RIGHT;
-    current_screen = idx;
-    lv_scr_load_anim(targets[idx], anim, 200, 0, false);
-}
-
-/* ============================================================
- * BUTTON CALLBACKS
- * ============================================================ */
-static void plan_btn_cb(lv_event_t *e) {
-    int idx = (int)(intptr_t)lv_event_get_user_data(e);
-    if (idx >= 0 && idx < NUM_PLANS && idx != g_selected_plan) {
-        g_selected_plan = idx;
-        update_settings_ui();
-        send_config_to_bridge();
-    }
-}
-
-static void view_btn_cb(lv_event_t *e) {
-    int idx = (int)(intptr_t)lv_event_get_user_data(e);
-    if (idx >= 0 && idx < NUM_VIEWS && idx != g_selected_view) {
-        g_selected_view = idx;
-        update_settings_ui();
-        send_config_to_bridge();
-    }
-}
-
-static void wifi_action_btn_cb(lv_event_t *e) {
-    (void)e;
-    if (g_wifi_ui_state == WIFI_STATE_AP_ACTIVE) {
-        g_cancel_ap_portal = true;
-    } else {
-        g_request_ap_portal = true;
-    }
-}
-
-/* ============================================================
- * WIDGET BUILDERS
- * ============================================================ */
-
-static lv_obj_t* create_metric_bar(lv_obj_t *parent, lv_color_t color, int x, int y, int w) {
-    lv_obj_t *bar = lv_bar_create(parent);
-    lv_obj_set_size(bar, w, 8);
-    lv_obj_set_pos(bar, x, y);
-    lv_bar_set_range(bar, 0, 100);
-    lv_bar_set_value(bar, 0, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(bar, CM_BAR_BG, LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_radius(bar, 4, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(bar, color, LV_PART_INDICATOR);
-    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_INDICATOR);
-    lv_obj_set_style_radius(bar, 4, LV_PART_INDICATOR);
-    lv_obj_set_style_anim_duration(bar, 400, LV_PART_INDICATOR);
-    return bar;
-}
-
-typedef struct { lv_obj_t *bar; lv_obj_t *pct_label; lv_obj_t *detail_label; } metric_row_t;
-
-static metric_row_t create_metric_row(lv_obj_t *scr, const char *title, lv_color_t color, int y) {
-    metric_row_t row;
-    lv_obj_t *lbl = lv_label_create(scr);
-    lv_label_set_text(lbl, title);
-    lv_obj_set_style_text_color(lbl, CM_TEXT_SEC, 0);
-    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
-    lv_obj_set_pos(lbl, 6, y + 1);
-    row.bar = create_metric_bar(scr, color, 52, y + 2, 160);
-    row.pct_label = lv_label_create(scr);
-    lv_label_set_text(row.pct_label, "0%");
-    lv_obj_set_style_text_color(row.pct_label, CM_TEXT_PRIM, 0);
-    lv_obj_set_style_text_font(row.pct_label, &lv_font_montserrat_10, 0);
-    lv_obj_set_pos(row.pct_label, 218, y);
-    row.detail_label = lv_label_create(scr);
-    lv_label_set_text(row.detail_label, "-- / --");
-    lv_obj_set_style_text_color(row.detail_label, CM_TEXT_DIM, 0);
-    lv_obj_set_style_text_font(row.detail_label, &lv_font_montserrat_10, 0);
-    lv_obj_set_pos(row.detail_label, 52, y + 14);
-    return row;
-}
-
-static void create_divider(lv_obj_t *scr, int y) {
-    lv_obj_t *div = lv_obj_create(scr);
-    lv_obj_set_size(div, 304, 1);
-    lv_obj_set_pos(div, 8, y);
-    lv_obj_set_style_bg_color(div, CM_DIVIDER, 0);
-    lv_obj_set_style_bg_opa(div, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(div, 0, 0);
-    lv_obj_set_scrollbar_mode(div, LV_SCROLLBAR_MODE_OFF);
-}
-
-/* Create a styled selection button */
-static lv_obj_t* create_select_btn(lv_obj_t *parent, const char *label_text,
-                                    int x, int y, int w, int h,
-                                    lv_event_cb_t cb, int user_data_idx) {
-    lv_obj_t *btn = lv_btn_create(parent);
-    lv_obj_set_size(btn, w, h);
-    lv_obj_set_pos(btn, x, y);
-    lv_obj_set_style_bg_color(btn, CM_BTN_BG, 0);
-    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(btn, CM_BTN_PRESSED, LV_STATE_PRESSED);
-    lv_obj_set_style_radius(btn, 6, 0);
-    lv_obj_set_style_border_width(btn, 2, 0);
-    lv_obj_set_style_border_color(btn, CM_DIVIDER, 0);
-    lv_obj_set_style_pad_all(btn, 0, 0);
-    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, (void *)(intptr_t)user_data_idx);
-
-    lv_obj_t *lbl = lv_label_create(btn);
-    lv_label_set_text(lbl, label_text);
-    lv_obj_set_style_text_color(lbl, CM_TEXT_PRIM, 0);
-    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
-    lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 0);
-
-    return btn;
-}
-
-/* 3-tab bar: Monitor | Settings | WiFi */
-static void create_tab_bar_3(lv_obj_t *scr, int active_idx) {
-    lv_obj_t *bg = lv_obj_create(scr);
-    lv_obj_set_size(bg, 320, 24);
-    lv_obj_set_pos(bg, 0, 216);
-    lv_obj_set_style_bg_color(bg, lv_color_hex(0x0A0A1A), 0);
-    lv_obj_set_style_bg_opa(bg, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(bg, 0, 0);
-    lv_obj_set_style_radius(bg, 0, 0);
-    lv_obj_set_style_pad_all(bg, 0, 0);
-    lv_obj_set_scrollbar_mode(bg, LV_SCROLLBAR_MODE_OFF);
-
-    struct { const char *text; lv_event_cb_t cb; } tabs[] = {
-        {"Monitor",  tab_monitor_cb},
-        {"Settings", tab_settings_cb},
-        {"WiFi",     tab_wifi_cb},
-    };
-
-    int tab_w = 100;
-    int gap   = 4;
-    int start = (320 - (3 * tab_w + 2 * gap)) / 2;
-
-    for (int i = 0; i < 3; i++) {
-        lv_obj_t *btn = lv_btn_create(bg);
-        lv_obj_set_size(btn, tab_w, 22);
-        lv_obj_set_pos(btn, start + i * (tab_w + gap), 1);
-        lv_obj_set_style_bg_color(btn, i == active_idx ? CM_TAB_ACTIVE : CM_TAB_INACTIVE, 0);
-        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
-        lv_obj_set_style_radius(btn, 4, 0);
-        lv_obj_set_style_border_width(btn, 0, 0);
-        lv_obj_set_style_pad_all(btn, 0, 0);
-        lv_obj_add_event_cb(btn, tabs[i].cb, LV_EVENT_CLICKED, NULL);
-
-        lv_obj_t *lbl = lv_label_create(btn);
-        lv_label_set_text(lbl, tabs[i].text);
-        lv_obj_set_style_text_color(lbl, i == active_idx ? CM_BG_DARK : CM_TEXT_SEC, 0);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
-        lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 0);
-    }
-}
-
-/* ============================================================
- * BUILD SCREENS
- * ============================================================ */
-
 static void build_monitor_screen(lv_obj_t *scr) {
-    lv_obj_set_style_bg_color(scr, CM_BG_DARK, 0);
+    lv_obj_set_style_bg_color(scr, CM_BG, 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
-    /* Header */
+    /* ── Header (0..70) ── */
     lv_obj_t *hdr = lv_obj_create(scr);
-    lv_obj_set_size(hdr, 320, 26); lv_obj_set_pos(hdr, 0, 0);
-    lv_obj_set_style_bg_color(hdr, CM_HEADER_BG, 0); lv_obj_set_style_bg_opa(hdr, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(hdr, 0, 0); lv_obj_set_style_radius(hdr, 0, 0);
-    lv_obj_set_style_pad_all(hdr, 3, 0); lv_obj_set_scrollbar_mode(hdr, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_size(hdr, 240, 70);
+    lv_obj_set_pos(hdr, 0, 0);
+    lv_obj_set_style_bg_color(hdr, CM_HEADER_BG, 0);
+    lv_obj_set_style_bg_opa(hdr, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(hdr, 0, 0);
+    lv_obj_set_style_radius(hdr, 0, 0);
+    lv_obj_set_style_pad_all(hdr, 0, 0);
+    lv_obj_set_scrollbar_mode(hdr, LV_SCROLLBAR_MODE_OFF);
 
-    status_led = lv_obj_create(hdr);
-    lv_obj_set_size(status_led, 8, 8); lv_obj_align(status_led, LV_ALIGN_LEFT_MID, 2, 0);
-    lv_obj_set_style_bg_color(status_led, CM_GREEN, 0); lv_obj_set_style_bg_opa(status_led, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(status_led, LV_RADIUS_CIRCLE, 0); lv_obj_set_style_border_width(status_led, 0, 0);
+    /* Status dot */
+    status_dot = lv_obj_create(hdr);
+    lv_obj_set_size(status_dot, 8, 8);
+    lv_obj_set_pos(status_dot, 8, 8);
+    lv_obj_set_style_bg_color(status_dot, CM_GREEN, 0);
+    lv_obj_set_style_bg_opa(status_dot, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(status_dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(status_dot, 0, 0);
 
-    lv_obj_t *t = lv_label_create(hdr);
-    lv_label_set_text(t, "CLAUDE MONITOR"); lv_obj_set_style_text_color(t, CM_TEXT_PRIM, 0);
-    lv_obj_set_style_text_font(t, &lv_font_montserrat_10, 0); lv_obj_align(t, LV_ALIGN_LEFT_MID, 16, 0);
+    /* Clock — left, montserrat_28 */
+    lbl_clock = lv_label_create(hdr);
+    lv_label_set_text(lbl_clock, "--:--");
+    lv_obj_set_style_text_font(lbl_clock, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(lbl_clock, CM_TEXT_PRIM, 0);
+    lv_obj_set_pos(lbl_clock, 20, 4);
 
-    lbl_plan = lv_label_create(hdr);
-    lv_label_set_text(lbl_plan, "Custom"); lv_obj_set_style_text_color(lbl_plan, CM_MODEL_COLOR, 0);
-    lv_obj_set_style_text_font(lbl_plan, &lv_font_montserrat_10, 0); lv_obj_align(lbl_plan, LV_ALIGN_CENTER, 30, 0);
+    /* Date — left, montserrat_10, directly below clock (~y=38+4=42) */
+    lbl_date = lv_label_create(hdr);
+    lv_label_set_text(lbl_date, "---");
+    lv_obj_set_style_text_font(lbl_date, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(lbl_date, CM_TEXT_SEC, 0);
+    lv_obj_set_pos(lbl_date, 20, 44);
 
-    lbl_reset_time = lv_label_create(hdr);
-    lv_label_set_text(lbl_reset_time, "5h 00m"); lv_obj_set_style_text_color(lbl_reset_time, CM_TEXT_SEC, 0);
-    lv_obj_set_style_text_font(lbl_reset_time, &lv_font_montserrat_10, 0); lv_obj_align(lbl_reset_time, LV_ALIGN_RIGHT_MID, -4, 0);
+    /* Weather temp — right column, montserrat_28, right-aligned */
+    lbl_weather_temp = lv_label_create(hdr);
+    lv_label_set_text(lbl_weather_temp, "--");
+    lv_obj_set_style_text_font(lbl_weather_temp, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(lbl_weather_temp, CM_TEXT_PRIM, 0);
+    lv_obj_set_pos(lbl_weather_temp, 118, 4);
+    lv_obj_set_width(lbl_weather_temp, 114);
+    lv_obj_set_style_text_align(lbl_weather_temp, LV_TEXT_ALIGN_RIGHT, 0);
 
-    int y = 32;
-    metric_row_t cr = create_metric_row(scr, "Cost", CM_GREEN, y);
-    bar_cost = cr.bar; lbl_cost_pct = cr.pct_label; lbl_cost_detail = cr.detail_label;
+    /* Weather cond — right column, montserrat_10, right-aligned, tight below temp */
+    lbl_weather_cond = lv_label_create(hdr);
+    lv_label_set_text(lbl_weather_cond, "--");
+    lv_obj_set_style_text_font(lbl_weather_cond, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(lbl_weather_cond, CM_TEXT_SEC, 0);
+    lv_obj_set_pos(lbl_weather_cond, 118, 44);
+    lv_obj_set_width(lbl_weather_cond, 114);
+    lv_obj_set_style_text_align(lbl_weather_cond, LV_TEXT_ALIGN_RIGHT, 0);
 
-    y = 62; create_divider(scr, y - 3);
-    metric_row_t tr = create_metric_row(scr, "Tokens", CM_BLUE, y);
-    bar_tokens = tr.bar; lbl_tokens_pct = tr.pct_label; lbl_tokens_detail = tr.detail_label;
+    /* ── Accent stripe (y=70..73) ── */
+    accent_bar = lv_obj_create(scr);
+    lv_obj_set_size(accent_bar, 240, 3);
+    lv_obj_set_pos(accent_bar, 0, 70);
+    lv_obj_set_style_bg_color(accent_bar, CM_ACCENT, 0);
+    lv_obj_set_style_bg_opa(accent_bar, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(accent_bar, 0, 0);
+    lv_obj_set_style_radius(accent_bar, 0, 0);
+    lv_obj_set_scrollbar_mode(accent_bar, LV_SCROLLBAR_MODE_OFF);
 
-    y = 92; create_divider(scr, y - 3);
-    metric_row_t mr = create_metric_row(scr, "Msgs", CM_PURPLE, y);
-    bar_msgs = mr.bar; lbl_msgs_pct = mr.pct_label; lbl_msgs_detail = mr.detail_label;
+    /* ── SESSION zone (y=83..143) ── */
 
-    create_divider(scr, 119);
+    /* SESSION mode: label + % */
+    lbl_sess_label = lv_label_create(scr);
+    lv_label_set_text(lbl_sess_label, "SESSION");
+    lv_obj_set_style_text_font(lbl_sess_label, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(lbl_sess_label, CM_TEXT_SEC, 0);
+    lv_obj_set_pos(lbl_sess_label, 8, 83);
 
-    /* Stats card 1 */
-    lv_obj_t *c1 = lv_obj_create(scr);
-    lv_obj_set_size(c1, 304, 26); lv_obj_set_pos(c1, 8, 124);
-    lv_obj_set_style_bg_color(c1, CM_BG_CARD, 0); lv_obj_set_style_bg_opa(c1, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(c1, 5, 0); lv_obj_set_style_border_width(c1, 1, 0);
-    lv_obj_set_style_border_color(c1, CM_DIVIDER, 0); lv_obj_set_style_pad_all(c1, 3, 0);
-    lv_obj_set_scrollbar_mode(c1, LV_SCROLLBAR_MODE_OFF);
+    lbl_session_pct = lv_label_create(scr);
+    lv_label_set_text(lbl_session_pct, "0%");
+    lv_obj_set_style_text_font(lbl_session_pct, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(lbl_session_pct, CM_TEXT_PRIM, 0);
+    lv_obj_set_pos(lbl_session_pct, 195, 83);
+    lv_obj_set_width(lbl_session_pct, 37);
+    lv_obj_set_style_text_align(lbl_session_pct, LV_TEXT_ALIGN_RIGHT, 0);
 
-    lv_obj_t *bi = lv_label_create(c1);
-    lv_label_set_text(bi, "Burn:"); lv_obj_set_style_text_color(bi, CM_TEXT_SEC, 0);
-    lv_obj_set_style_text_font(bi, &lv_font_montserrat_10, 0); lv_obj_align(bi, LV_ALIGN_LEFT_MID, 2, 0);
-    lbl_burn = lv_label_create(c1);
-    lv_label_set_text(lbl_burn, "0.0 t/m"); lv_obj_set_style_text_color(lbl_burn, CM_ORANGE, 0);
-    lv_obj_set_style_text_font(lbl_burn, &lv_font_montserrat_10, 0); lv_obj_align(lbl_burn, LV_ALIGN_LEFT_MID, 38, 0);
-    lv_obj_t *ci = lv_label_create(c1);
-    lv_label_set_text(ci, "Cost:"); lv_obj_set_style_text_color(ci, CM_TEXT_SEC, 0);
-    lv_obj_set_style_text_font(ci, &lv_font_montserrat_10, 0); lv_obj_align(ci, LV_ALIGN_CENTER, 20, 0);
-    lbl_cost_rate = lv_label_create(c1);
-    lv_label_set_text(lbl_cost_rate, "$0.00/m"); lv_obj_set_style_text_color(lbl_cost_rate, CM_GREEN, 0);
-    lv_obj_set_style_text_font(lbl_cost_rate, &lv_font_montserrat_10, 0); lv_obj_align(lbl_cost_rate, LV_ALIGN_CENTER, 62, 0);
+    /* SESSION mode: progress bar */
+    bar_session = make_bar(scr, CM_ACCENT, 6, 99, 228, 14);
 
-    /* Stats card 2 */
-    lv_obj_t *c2 = lv_obj_create(scr);
-    lv_obj_set_size(c2, 304, 26); lv_obj_set_pos(c2, 8, 154);
-    lv_obj_set_style_bg_color(c2, CM_BG_CARD, 0); lv_obj_set_style_bg_opa(c2, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(c2, 5, 0); lv_obj_set_style_border_width(c2, 1, 0);
-    lv_obj_set_style_border_color(c2, CM_DIVIDER, 0); lv_obj_set_style_pad_all(c2, 3, 0);
-    lv_obj_set_scrollbar_mode(c2, LV_SCROLLBAR_MODE_OFF);
+    /* SESSION mode: remaining time (montserrat_12, centered) */
+    lbl_time_remain = lv_label_create(scr);
+    lv_label_set_text(lbl_time_remain, "-- left");
+    lv_obj_set_style_text_font(lbl_time_remain, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(lbl_time_remain, CM_ACCENT, 0);
+    lv_obj_set_width(lbl_time_remain, 240);
+    lv_obj_set_style_text_align(lbl_time_remain, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(lbl_time_remain, 0, 120);
 
-    lv_obj_t *mi = lv_label_create(c2);
-    lv_label_set_text(mi, "Model:"); lv_obj_set_style_text_color(mi, CM_TEXT_SEC, 0);
-    lv_obj_set_style_text_font(mi, &lv_font_montserrat_10, 0); lv_obj_align(mi, LV_ALIGN_LEFT_MID, 2, 0);
-    lbl_model = lv_label_create(c2);
-    lv_label_set_text(lbl_model, "-- 0%"); lv_obj_set_style_text_color(lbl_model, CM_MODEL_COLOR, 0);
-    lv_obj_set_style_text_font(lbl_model, &lv_font_montserrat_10, 0); lv_obj_align(lbl_model, LV_ALIGN_LEFT_MID, 42, 0);
-    lbl_reset = lv_label_create(c2);
-    lv_label_set_text(lbl_reset, "Reset: 5h 00m"); lv_obj_set_style_text_color(lbl_reset, CM_BLUE, 0);
-    lv_obj_set_style_text_font(lbl_reset, &lv_font_montserrat_10, 0); lv_obj_align(lbl_reset, LV_ALIGN_RIGHT_MID, -4, 0);
+    /* RESET IN mode: label (hidden by default) */
+    lbl_reset_in = lv_label_create(scr);
+    lv_label_set_text(lbl_reset_in, "RESET IN");
+    lv_obj_set_style_text_font(lbl_reset_in, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(lbl_reset_in, CM_TEXT_DIM, 0);
+    lv_obj_set_width(lbl_reset_in, 240);
+    lv_obj_set_style_text_align(lbl_reset_in, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(lbl_reset_in, 0, 83);
+    lv_obj_add_flag(lbl_reset_in, LV_OBJ_FLAG_HIDDEN);
 
-    create_divider(scr, 184);
+    /* RESET IN mode: countdown montserrat_28 (hidden by default) */
+    lbl_countdown = lv_label_create(scr);
+    lv_label_set_text(lbl_countdown, "0:00:00");
+    lv_obj_set_style_text_font(lbl_countdown, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(lbl_countdown, CM_ACCENT, 0);
+    lv_obj_set_width(lbl_countdown, 240);
+    lv_obj_set_style_text_align(lbl_countdown, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(lbl_countdown, 0, 97);
+    lv_obj_add_flag(lbl_countdown, LV_OBJ_FLAG_HIDDEN);
 
-    lbl_depletion = lv_label_create(scr);
-    lv_label_set_text(lbl_depletion, "Active session | P90 limits");
-    lv_obj_set_style_text_color(lbl_depletion, CM_TEXT_DIM, 0);
-    lv_obj_set_style_text_font(lbl_depletion, &lv_font_montserrat_10, 0);
-    lv_obj_set_pos(lbl_depletion, 60, 194);
+    /* ── Tokens ── */
+    make_divider(scr, 148, CM_DIVIDER);
 
-    create_tab_bar_3(scr, 0);
+    make_label(scr, "TOKENS THIS SESSION", &lv_font_montserrat_10, CM_TEXT_DIM, 8, 158);
+
+    /* Token count — montserrat_28, centered */
+    lbl_tokens = lv_label_create(scr);
+    lv_label_set_text(lbl_tokens, "--");
+    lv_obj_set_style_text_font(lbl_tokens, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(lbl_tokens, CM_ACCENT, 0);
+    lv_obj_set_width(lbl_tokens, 240);
+    lv_obj_set_style_text_align(lbl_tokens, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(lbl_tokens, 0, 174);
+
+    /* ── Model + Msgs ── */
+    make_divider(scr, 218, CM_DIVIDER);
+
+    lbl_model = lv_label_create(scr);
+    lv_label_set_text(lbl_model, "--  0%");
+    lv_obj_set_style_text_font(lbl_model, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(lbl_model, CM_YELLOW, 0);
+    lv_obj_set_pos(lbl_model, 8, 228);
+
+    lbl_msgs = lv_label_create(scr);
+    lv_label_set_text(lbl_msgs, "Msgs --/--  -- msg/h");
+    lv_obj_set_style_text_font(lbl_msgs, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(lbl_msgs, CM_TEXT_SEC, 0);
+    lv_obj_set_pos(lbl_msgs, 8, 250);
+
+    make_divider(scr, 272, CM_DIVIDER);
+
+    create_tab_bar(scr, 0);
 }
 
+/* ============================================================
+ * BUILD: SETTINGS SCREEN
+ * ============================================================ */
 static void build_settings_screen(lv_obj_t *scr) {
-    lv_obj_set_style_bg_color(scr, CM_BG_DARK, 0);
+    lv_obj_set_style_bg_color(scr, CM_BG, 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
     /* Header */
     lv_obj_t *hdr = lv_obj_create(scr);
-    lv_obj_set_size(hdr, 320, 26); lv_obj_set_pos(hdr, 0, 0);
-    lv_obj_set_style_bg_color(hdr, CM_HEADER_BG, 0); lv_obj_set_style_bg_opa(hdr, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(hdr, 0, 0); lv_obj_set_style_radius(hdr, 0, 0);
-    lv_obj_set_style_pad_all(hdr, 3, 0); lv_obj_set_scrollbar_mode(hdr, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_size(hdr, 240, 40);
+    lv_obj_set_pos(hdr, 0, 0);
+    lv_obj_set_style_bg_color(hdr, CM_HEADER_BG, 0);
+    lv_obj_set_style_bg_opa(hdr, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(hdr, 0, 0);
+    lv_obj_set_style_radius(hdr, 0, 0);
+    lv_obj_set_style_pad_all(hdr, 0, 0);
+    lv_obj_set_scrollbar_mode(hdr, LV_SCROLLBAR_MODE_OFF);
 
     lv_obj_t *ht = lv_label_create(hdr);
     lv_label_set_text(ht, "Settings");
+    lv_obj_set_style_text_font(ht, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(ht, CM_TEXT_PRIM, 0);
-    lv_obj_set_style_text_font(ht, &lv_font_montserrat_12, 0);
-    lv_obj_align(ht, LV_ALIGN_LEFT_MID, 8, 0);
+    lv_obj_align(ht, LV_ALIGN_LEFT_MID, 12, 0);
 
-    /* Plan section */
-    lv_obj_t *pl = lv_label_create(scr);
-    lv_label_set_text(pl, "Plan:");
-    lv_obj_set_style_text_color(pl, CM_TEXT_SEC, 0);
-    lv_obj_set_style_text_font(pl, &lv_font_montserrat_10, 0);
-    lv_obj_set_pos(pl, 10, 36);
+    make_divider(scr, 40, CM_ACCENT);
 
-    int btn_w = 70, btn_h = 32, gap = 6;
-    int start_x = 10;
-    for (int i = 0; i < NUM_PLANS; i++) {
-        plan_btns[i] = create_select_btn(scr, plan_labels[i],
-            start_x + i * (btn_w + gap), 50, btn_w, btn_h,
-            plan_btn_cb, i);
-    }
-
-    /* Divider */
-    create_divider(scr, 92);
-
-    /* View section */
-    lv_obj_t *vl = lv_label_create(scr);
-    lv_label_set_text(vl, "View:");
-    lv_obj_set_style_text_color(vl, CM_TEXT_SEC, 0);
-    lv_obj_set_style_text_font(vl, &lv_font_montserrat_10, 0);
-    lv_obj_set_pos(vl, 10, 102);
-
-    int vbtn_w = 95;
-    for (int i = 0; i < NUM_VIEWS; i++) {
-        view_btns[i] = create_select_btn(scr, view_labels[i],
-            start_x + i * (vbtn_w + gap), 116, vbtn_w, btn_h,
-            view_btn_cb, i);
-    }
-
-    /* Divider */
-    create_divider(scr, 158);
-
-    /* Status line */
-    lbl_settings_status = lv_label_create(scr);
-    lv_label_set_text(lbl_settings_status, "Active: Custom | Realtime");
-    lv_obj_set_style_text_color(lbl_settings_status, CM_GREEN, 0);
-    lv_obj_set_style_text_font(lbl_settings_status, &lv_font_montserrat_10, 0);
-    lv_obj_set_pos(lbl_settings_status, 10, 170);
-
-    /* Hint */
-    lv_obj_t *hint = lv_label_create(scr);
-    lv_label_set_text(hint, "Tap to change. Sent to bridge instantly.");
-    lv_obj_set_style_text_color(hint, CM_TEXT_DIM, 0);
-    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
-    lv_obj_set_pos(hint, 10, 190);
-
-    /* Tab bar */
-    create_tab_bar_3(scr, 2);
-}
-
-static void build_wifi_screen(lv_obj_t *scr) {
-    lv_obj_set_style_bg_color(scr, CM_BG_DARK, 0);
-    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
-
-    /* Header */
-    lv_obj_t *hdr = lv_obj_create(scr);
-    lv_obj_set_size(hdr, 320, 26); lv_obj_set_pos(hdr, 0, 0);
-    lv_obj_set_style_bg_color(hdr, CM_HEADER_BG, 0); lv_obj_set_style_bg_opa(hdr, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(hdr, 0, 0); lv_obj_set_style_radius(hdr, 0, 0);
-    lv_obj_set_style_pad_all(hdr, 3, 0); lv_obj_set_scrollbar_mode(hdr, LV_SCROLLBAR_MODE_OFF);
-
-    lv_obj_t *ht = lv_label_create(hdr);
-    lv_label_set_text(ht, "WiFi");
-    lv_obj_set_style_text_color(ht, CM_TEXT_PRIM, 0);
-    lv_obj_set_style_text_font(ht, &lv_font_montserrat_12, 0);
-    lv_obj_align(ht, LV_ALIGN_LEFT_MID, 8, 0);
-
-    /* Status row: dot + state label */
-    lv_obj_t *dot = lv_obj_create(scr);
-    lv_obj_set_size(dot, 8, 8); lv_obj_set_pos(dot, 10, 38);
-    lv_obj_set_style_bg_color(dot, CM_TEXT_DIM, 0);
-    lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_border_width(dot, 0, 0);
+    /* ── WiFi section ── */
+    make_label(scr, "WIFI", &lv_font_montserrat_10, CM_TEXT_DIM, 10, 52);
 
     lbl_wifi_state = lv_label_create(scr);
     lv_label_set_text(lbl_wifi_state, "Not connected");
+    lv_obj_set_style_text_font(lbl_wifi_state, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(lbl_wifi_state, CM_RED, 0);
-    lv_obj_set_style_text_font(lbl_wifi_state, &lv_font_montserrat_10, 0);
-    lv_obj_set_pos(lbl_wifi_state, 24, 36);
+    lv_obj_set_pos(lbl_wifi_state, 10, 68);
 
-    /* SSID row */
-    lv_obj_t *ssid_lbl = lv_label_create(scr);
-    lv_label_set_text(ssid_lbl, "SSID:");
-    lv_obj_set_style_text_color(ssid_lbl, CM_TEXT_SEC, 0);
-    lv_obj_set_style_text_font(ssid_lbl, &lv_font_montserrat_10, 0);
-    lv_obj_set_pos(ssid_lbl, 10, 54);
-
+    make_label(scr, "SSID:", &lv_font_montserrat_10, CM_TEXT_DIM, 10, 92);
     lbl_wifi_ssid_val = lv_label_create(scr);
     lv_label_set_text(lbl_wifi_ssid_val, "--");
-    lv_obj_set_style_text_color(lbl_wifi_ssid_val, CM_TEXT_PRIM, 0);
     lv_obj_set_style_text_font(lbl_wifi_ssid_val, &lv_font_montserrat_10, 0);
-    lv_obj_set_pos(lbl_wifi_ssid_val, 48, 54);
+    lv_obj_set_style_text_color(lbl_wifi_ssid_val, CM_TEXT_PRIM, 0);
+    lv_obj_set_pos(lbl_wifi_ssid_val, 50, 92);
 
-    /* IP row */
-    lv_obj_t *ip_lbl = lv_label_create(scr);
-    lv_label_set_text(ip_lbl, "IP:");
-    lv_obj_set_style_text_color(ip_lbl, CM_TEXT_SEC, 0);
-    lv_obj_set_style_text_font(ip_lbl, &lv_font_montserrat_10, 0);
-    lv_obj_set_pos(ip_lbl, 10, 70);
-
+    make_label(scr, "IP:", &lv_font_montserrat_10, CM_TEXT_DIM, 10, 108);
     lbl_wifi_ip_val = lv_label_create(scr);
     lv_label_set_text(lbl_wifi_ip_val, "--");
-    lv_obj_set_style_text_color(lbl_wifi_ip_val, CM_TEXT_PRIM, 0);
     lv_obj_set_style_text_font(lbl_wifi_ip_val, &lv_font_montserrat_10, 0);
-    lv_obj_set_pos(lbl_wifi_ip_val, 48, 70);
+    lv_obj_set_style_text_color(lbl_wifi_ip_val, CM_TEXT_PRIM, 0);
+    lv_obj_set_pos(lbl_wifi_ip_val, 50, 108);
 
-    /* Divider */
-    create_divider(scr, 90);
-
-    /* Action button — 300px wide, centered in 320px screen */
     btn_wifi_action = lv_btn_create(scr);
-    lv_obj_set_size(btn_wifi_action, 300, 36);
-    lv_obj_set_pos(btn_wifi_action, 10, 96);
+    lv_obj_set_size(btn_wifi_action, 220, 44);
+    lv_obj_set_pos(btn_wifi_action, 10, 126);
     lv_obj_set_style_bg_color(btn_wifi_action, CM_BTN_BG, 0);
     lv_obj_set_style_bg_opa(btn_wifi_action, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(btn_wifi_action, CM_BTN_PRESSED, LV_STATE_PRESSED);
-    lv_obj_set_style_radius(btn_wifi_action, 6, 0);
-    lv_obj_set_style_border_width(btn_wifi_action, 2, 0);
-    lv_obj_set_style_border_color(btn_wifi_action, CM_TAB_ACTIVE, 0);
+    lv_obj_set_style_bg_color(btn_wifi_action, CM_BTN_PRESS, LV_STATE_PRESSED);
+    lv_obj_set_style_radius(btn_wifi_action, 8, 0);
+    lv_obj_set_style_border_width(btn_wifi_action, 1, 0);
+    lv_obj_set_style_border_color(btn_wifi_action, CM_ACCENT, 0);
     lv_obj_set_style_pad_all(btn_wifi_action, 0, 0);
     lv_obj_add_event_cb(btn_wifi_action, wifi_action_btn_cb, LV_EVENT_CLICKED, NULL);
-
     lbl_btn_wifi_action = lv_label_create(btn_wifi_action);
     lv_label_set_text(lbl_btn_wifi_action, "Setup WiFi");
+    lv_obj_set_style_text_font(lbl_btn_wifi_action, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(lbl_btn_wifi_action, CM_TEXT_PRIM, 0);
-    lv_obj_set_style_text_font(lbl_btn_wifi_action, &lv_font_montserrat_10, 0);
     lv_obj_align(lbl_btn_wifi_action, LV_ALIGN_CENTER, 0, 0);
 
-    /* Divider */
-    create_divider(scr, 140);
+    make_label(scr, "Connect to 'CYD-Setup' WiFi -> 192.168.4.1",
+               &lv_font_montserrat_10, CM_TEXT_DIM, 10, 178);
 
-    /* Hint lines */
-    lbl_wifi_hint1 = lv_label_create(scr);
-    lv_label_set_text(lbl_wifi_hint1, "1. Press button above");
-    lv_obj_set_style_text_color(lbl_wifi_hint1, CM_TEXT_DIM, 0);
-    lv_obj_set_style_text_font(lbl_wifi_hint1, &lv_font_montserrat_10, 0);
-    lv_obj_set_pos(lbl_wifi_hint1, 10, 148);
+    /* ── Timezone section ── */
+    make_divider(scr, 198, CM_DIVIDER);
 
-    lbl_wifi_hint2 = lv_label_create(scr);
-    lv_label_set_text(lbl_wifi_hint2, "2. Connect to 'CYD-Setup' WiFi");
-    lv_obj_set_style_text_color(lbl_wifi_hint2, CM_TEXT_DIM, 0);
-    lv_obj_set_style_text_font(lbl_wifi_hint2, &lv_font_montserrat_10, 0);
-    lv_obj_set_pos(lbl_wifi_hint2, 10, 162);
+    make_label(scr, "CLOCK TIMEZONE", &lv_font_montserrat_10, CM_TEXT_DIM, 10, 210);
 
-    lbl_wifi_hint3 = lv_label_create(scr);
-    lv_label_set_text(lbl_wifi_hint3, "3. Open 192.168.4.1 in browser");
-    lv_obj_set_style_text_color(lbl_wifi_hint3, CM_TEXT_DIM, 0);
-    lv_obj_set_style_text_font(lbl_wifi_hint3, &lv_font_montserrat_10, 0);
-    lv_obj_set_pos(lbl_wifi_hint3, 10, 176);
+    make_btn(scr, "-", 10, 228, 50, 40, tz_minus_cb, NULL);
 
-    /* Tab bar — active tab = 2 (WiFi) */
-    create_tab_bar_3(scr, 2);
+    lbl_tz = lv_label_create(scr);
+    lv_label_set_text(lbl_tz, "UTC+3");
+    lv_obj_set_style_text_font(lbl_tz, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(lbl_tz, CM_ACCENT, 0);
+    lv_obj_set_width(lbl_tz, 100);
+    lv_obj_set_style_text_align(lbl_tz, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(lbl_tz, 68, 238);
+
+    make_btn(scr, "+", 180, 228, 50, 40, tz_plus_cb, NULL);
+
+    make_label(scr, "Saves automatically",
+               &lv_font_montserrat_10, CM_TEXT_DIM, 10, 278);
+
+    create_tab_bar(scr, 1);
 }
 
 /* ============================================================
- * PC TIMER
+ * PC TIMER (simulator only)
  * ============================================================ */
 #ifndef ESP32
-static void data_poll_cb(lv_timer_t *timer) {
-    (void)timer;
-    load_data_from_file();
-    update_ui();
-}
+static void data_poll_cb(lv_timer_t *t) { (void)t; load_data_from_file(); update_ui(); }
 #endif
 
 /* ============================================================
@@ -862,18 +775,14 @@ static void claude_monitor_create_ui(void) {
     scr_settings = lv_obj_create(NULL);
     build_settings_screen(scr_settings);
 
-    scr_wifi = lv_obj_create(NULL);
-    build_wifi_screen(scr_wifi);
-
     current_screen = 0;
-    update_settings_ui();
     update_wifi_ui();
+    update_tz_display();
 
 #ifndef ESP32
     lv_timer_create(data_poll_cb, 2000, NULL);
     load_data_from_file();
 #endif
-
     update_ui();
 }
 

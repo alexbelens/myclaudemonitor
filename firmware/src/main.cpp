@@ -1,17 +1,9 @@
 /**
- * main.cpp - Claude Monitor CYD Firmware v3
+ * main.cpp - Claude Monitor CYD Firmware v4
  *
- * Four-screen: Monitor + Windows + Settings + WiFi
- * Raw HSPI display driver + XPT2046 touch + LVGL + serial + WiFi/HTTP
- *
- * WiFi provisioning:
- *   - Option A (serial): send {"wifi_config":{"ssid":"...","pass":"..."}}
- *   - Option B (captive portal): tap "Setup WiFi" on the WiFi screen,
- *     connect to "CYD-Setup" AP, open 192.168.4.1, fill in the form.
- *
- * After credentials are saved the device reboots and connects automatically.
- * The HTTP server on port 80 serves the monitor API at /api/monitor (POST)
- * and status at /api/status (GET). mDNS: claude-monitor.local
+ * Two-screen: Monitor + Settings
+ * Raw HSPI display (portrait 240x320, 180° rotation) + XPT2046 touch + LVGL
+ * WiFi/HTTP + USB serial + NTP clock + wttr.in weather
  */
 
 #include <Arduino.h>
@@ -20,10 +12,12 @@
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
+#include <HTTPClient.h>
+#include <time.h>
 #include "lvgl.h"
 
 /* ============================================================
- * ILI9341 Raw SPI Driver (proven working)
+ * ILI9341 Raw SPI Driver
  * ============================================================ */
 
 #define LCD_CS   15
@@ -32,8 +26,8 @@
 #define LCD_MISO 12
 #define LCD_SCLK 14
 #define LCD_BL   21
-#define LCD_W 320
-#define LCD_H 240
+#define LCD_W 240
+#define LCD_H 320
 
 static SPIClass hspi(HSPI);
 
@@ -67,21 +61,21 @@ static void lcd_init(void) {
     lcd_cmd(0x01); delay(150);
     lcd_cmd(0x11); delay(150);
     lcd_cmd(0x29); delay(50);
-    uint8_t mac[] = {0x28};
+    uint8_t mac[] = {0x08};  /* portrait, BGR */
     lcd_cmd_data(0x36, mac, 1);
     uint8_t pf[] = {0x55};
     lcd_cmd_data(0x3A, pf, 1);
 
     /* Clear to black */
-    uint8_t ca[] = {0x00, 0x00, 0x01, 0x3F};
+    uint8_t ca[] = {0x00, 0x00, 0x00, 0xEF};  /* columns 0..239 */
     lcd_cmd_data(0x2A, ca, 4);
-    uint8_t ra[] = {0x00, 0x00, 0x00, 0xEF};
+    uint8_t ra[] = {0x00, 0x00, 0x01, 0x3F};  /* rows 0..319 */
     lcd_cmd_data(0x2B, ra, 4);
     digitalWrite(LCD_CS, LOW);
     digitalWrite(LCD_DC, LOW);
     hspi.transfer(0x2C);
     digitalWrite(LCD_DC, HIGH);
-    for (uint32_t i = 0; i < 320UL * 240UL; i++) {
+    for (uint32_t i = 0; i < 240UL * 320UL; i++) {
         hspi.transfer(0x00);
         hspi.transfer(0x00);
     }
@@ -89,7 +83,7 @@ static void lcd_init(void) {
 }
 
 /* ============================================================
- * LVGL Display Driver (X-mirror fix in flush)
+ * LVGL Display Driver — 180° rotation (mirror both axes)
  * ============================================================ */
 
 #define BUF_LINES 20
@@ -99,12 +93,12 @@ static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
     uint16_t x1 = area->x1, y1 = area->y1, x2 = area->x2, y2 = area->y2;
     uint32_t w = x2 - x1 + 1, h = y2 - y1 + 1;
 
-    uint16_t mx1 = LCD_W - 1 - x2;
-    uint16_t mx2 = LCD_W - 1 - x1;
+    uint16_t mx1 = LCD_W - 1 - x2, mx2 = LCD_W - 1 - x1;
+    uint16_t my1 = LCD_H - 1 - y2, my2 = LCD_H - 1 - y1;
 
     uint8_t ca[] = {(uint8_t)(mx1>>8),(uint8_t)mx1,(uint8_t)(mx2>>8),(uint8_t)mx2};
     lcd_cmd_data(0x2A, ca, 4);
-    uint8_t ra[] = {(uint8_t)(y1>>8),(uint8_t)y1,(uint8_t)(y2>>8),(uint8_t)y2};
+    uint8_t ra[] = {(uint8_t)(my1>>8),(uint8_t)my1,(uint8_t)(my2>>8),(uint8_t)my2};
     lcd_cmd_data(0x2B, ra, 4);
 
     uint16_t *pixels = (uint16_t *)px_map;
@@ -112,11 +106,11 @@ static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
     digitalWrite(LCD_DC, LOW);
     hspi.transfer(0x2C);
     digitalWrite(LCD_DC, HIGH);
-    for (uint32_t row = 0; row < h; row++) {
-        uint16_t *row_start = &pixels[row * w];
+    for (int32_t row = h - 1; row >= 0; row--) {
         for (int32_t col = w - 1; col >= 0; col--) {
-            hspi.transfer(row_start[col] >> 8);
-            hspi.transfer(row_start[col] & 0xFF);
+            uint16_t px = pixels[row * w + col];
+            hspi.transfer(px >> 8);
+            hspi.transfer(px & 0xFF);
         }
     }
     digitalWrite(LCD_CS, HIGH);
@@ -126,7 +120,7 @@ static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
 static uint32_t lv_tick_cb(void) { return millis(); }
 
 /* ============================================================
- * Touch (XPT2046) — Y mirrored to match display
+ * Touch (XPT2046) — portrait + 180°
  * ============================================================ */
 
 #include <XPT2046_Touchscreen.h>
@@ -144,8 +138,8 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
     (void)indev;
     if (ts.touched()) {
         TS_Point p = ts.getPoint();
-        int x = 319 - map(p.x, 200, 3700, 0, 319);
-        int y = 239 - map(p.y, 200, 3700, 0, 239);
+        int x = map(p.y, 200, 3700, 0, 239);
+        int y = 319 - map(p.x, 200, 3700, 0, 319);
         data->point.x = x;
         data->point.y = y;
         data->state = LV_INDEV_STATE_PRESSED;
@@ -155,16 +149,107 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
 }
 
 /* ============================================================
- * Serial Router + Dashboard UI
+ * UI Header
  * ============================================================ */
 
 #include "../../src/claude_monitor_ui.h"
+
+/* ============================================================
+ * Forward declarations
+ * ============================================================ */
+static bool wifi_connected = false;
+
+/* ============================================================
+ * Clock + Countdown
+ * ============================================================ */
+
+static time_t g_reset_epoch = 0;   /* absolute time of next reset */
+
+static void update_reset_epoch(void) {
+    if (g_data.reset_min > 0) {
+        g_reset_epoch = time(nullptr) + (time_t)g_data.reset_min * 60;
+    }
+}
+
+static void update_clock_and_countdown(void) {
+    struct tm ti;
+    time_t now = time(nullptr);
+    int secs_left = (g_reset_epoch > now) ? (int)(g_reset_epoch - now) : 0;
+
+    if (!getLocalTime(&ti)) {
+        update_realtime_ui("--:--", "", secs_left);
+        return;
+    }
+    char timebuf[8], datebuf[16];
+    strftime(timebuf, sizeof(timebuf), "%H:%M", &ti);
+    strftime(datebuf, sizeof(datebuf), "%a %d %b", &ti);  /* "Mon 17 May" */
+    update_realtime_ui(timebuf, datebuf, secs_left);
+}
+
+/* ============================================================
+ * Weather — wttr.in plain text, no API key
+ * ============================================================ */
+
+static unsigned long last_weather_ms = 0;
+
+static void fetch_weather(void) {
+    if (!wifi_connected) return;
+    HTTPClient http;
+    http.begin("http://wttr.in/?format=%C+%t");
+    http.setTimeout(8000);
+    int code = http.GET();
+    if (code == 200) {
+        String body = http.getString();
+        body.trim();
+        /* Copy printable chars; skip non-ASCII control but keep UTF-8 sequences
+           (degree symbol U+00B0 = 0xC2 0xB0) */
+        char out[28] = {0};
+        int oi = 0;
+        for (int i = 0; i < (int)body.length() && oi < 27; i++) {
+            uint8_t c = (uint8_t)body[i];
+            if (c >= 0x20) {   /* printable or UTF-8 continuation */
+                out[oi++] = (char)c;
+            }
+        }
+        out[oi] = '\0';
+        if (oi > 0) {
+            strncpy(g_weather_str, out, sizeof(g_weather_str) - 1);
+            update_weather_display(g_weather_str);
+        }
+    }
+    http.end();
+}
+
+/* ============================================================
+ * Timezone — NVS persistence
+ * ============================================================ */
+
+static void load_tz_from_nvs(void) {
+    Preferences prefs;
+    prefs.begin("cyd", true);
+    g_tz_offset = prefs.getInt("tz_offset", 3);
+    prefs.end();
+}
+
+static void save_tz_to_nvs(void) {
+    Preferences prefs;
+    prefs.begin("cyd", false);
+    prefs.putInt("tz_offset", g_tz_offset);
+    prefs.end();
+}
+
+static void apply_timezone(void) {
+    configTime((long)g_tz_offset * 3600L, 0, "pool.ntp.org");
+}
+
+/* ============================================================
+ * Serial Router
+ * ============================================================ */
 
 #define SERIAL_BUF_SIZE 1024
 static char serial_buf[SERIAL_BUF_SIZE];
 static uint16_t serial_pos = 0;
 
-/* Forward declarations */
 static void handle_wifi_config(const char *buf);
 
 static void route_serial_message(const char *buf) {
@@ -172,6 +257,7 @@ static void route_serial_message(const char *buf) {
         handle_wifi_config(buf);
     } else {
         load_data_from_json(buf);
+        update_reset_epoch();
         update_ui();
     }
 }
@@ -196,11 +282,10 @@ static void check_serial_data(void) {
 }
 
 /* ============================================================
- * WiFi + HTTP Server (monitor API)
+ * WiFi + HTTP Server
  * ============================================================ */
 
 static WebServer http_server(80);
-static bool wifi_connected = false;
 static char http_body_buf[SERIAL_BUF_SIZE];
 
 static void http_handle_monitor(void) {
@@ -208,6 +293,7 @@ static void http_handle_monitor(void) {
         strncpy(http_body_buf, http_server.arg("plain").c_str(), SERIAL_BUF_SIZE - 1);
         http_body_buf[SERIAL_BUF_SIZE - 1] = '\0';
         load_data_from_json(http_body_buf);
+        update_reset_epoch();
         update_ui();
         http_server.send(200, "application/json", "{\"ok\":true}");
     } else {
@@ -218,7 +304,7 @@ static void http_handle_monitor(void) {
 static void http_handle_status(void) {
     char resp[128];
     snprintf(resp, sizeof(resp),
-        "{\"ok\":true,\"version\":\"3.0\",\"ip\":\"%s\"}",
+        "{\"ok\":true,\"version\":\"4.0\",\"ip\":\"%s\"}",
         WiFi.localIP().toString().c_str());
     http_server.send(200, "application/json", resp);
 }
@@ -235,7 +321,6 @@ static WebServer ap_server(80);
 static bool ap_mode_active = false;
 static bool ap_reboot_pending = false;
 
-/* URL-decode a percent-encoded string in-place */
 static void url_decode(char *dst, const char *src, size_t dst_len) {
     size_t di = 0;
     while (*src && di < dst_len - 1) {
@@ -253,7 +338,6 @@ static void url_decode(char *dst, const char *src, size_t dst_len) {
     dst[di] = '\0';
 }
 
-/* Extract a form field value from a URL-encoded POST body */
 static bool extract_form_field(const char *body, const char *field,
                                 char *out, size_t out_len) {
     char search[64];
@@ -261,7 +345,6 @@ static bool extract_form_field(const char *body, const char *field,
     const char *p = strstr(body, search);
     if (!p) return false;
     p += strlen(search);
-    /* value ends at '&' or end of string */
     const char *end = strchr(p, '&');
     char raw[256] = {0};
     size_t raw_len = end ? (size_t)(end - p) : strlen(p);
@@ -308,9 +391,7 @@ static void ap_handle_root(void) {
 
 static void ap_handle_save(void) {
     String body = ap_server.hasArg("plain") ? ap_server.arg("plain") : "";
-    /* Also accept application/x-www-form-urlencoded body via hasArg */
     if (body.length() == 0) {
-        /* Try reading individual form args set by WebServer parser */
         String s = ap_server.arg("ssid");
         String pw = ap_server.arg("pass");
         if (s.length() > 0) {
@@ -347,31 +428,23 @@ static void ap_handle_save(void) {
 }
 
 static void ap_handle_not_found(void) {
-    /* Redirect all unknown paths to the setup form (captive portal behaviour) */
     ap_server.sendHeader("Location", "http://192.168.4.1/", true);
     ap_server.send(302, "text/plain", "");
 }
 
 static void start_ap_portal(void) {
     if (ap_mode_active) return;
-
-    /* Stop STA mode if connected — soft AP can coexist but WIFI_AP_STA
-     * uses more resources; switch to AP-only for simplicity */
     WiFi.disconnect(false);
     WiFi.mode(WIFI_AP);
     WiFi.softAP("CYD-Setup");
-
     ap_server.on("/",      HTTP_GET,  ap_handle_root);
-    ap_server.on("/save",  HTTP_GET,  ap_handle_root);   /* safety redirect */
+    ap_server.on("/save",  HTTP_GET,  ap_handle_root);
     ap_server.on("/save",  HTTP_POST, ap_handle_save);
     ap_server.onNotFound(ap_handle_not_found);
     ap_server.begin();
-
     ap_mode_active = true;
     ap_reboot_pending = false;
-
     Serial.println("[AP] Portal started: SSID=CYD-Setup  IP=192.168.4.1");
-
     g_wifi_ui_state = WIFI_STATE_AP_ACTIVE;
     strncpy(g_wifi_ui_ssid, "CYD-Setup", sizeof(g_wifi_ui_ssid) - 1);
     strncpy(g_wifi_ui_ip,   "192.168.4.1", sizeof(g_wifi_ui_ip) - 1);
@@ -380,21 +453,13 @@ static void start_ap_portal(void) {
 
 static void stop_ap_portal(void) {
     if (!ap_mode_active) return;
-
     ap_server.stop();
     WiFi.softAPdisconnect(true);
     ap_mode_active = false;
     ap_reboot_pending = false;
-
     Serial.println("[AP] Portal stopped");
-
-    if (wifi_connected) {
-        WiFi.mode(WIFI_STA);
-        g_wifi_ui_state = WIFI_STATE_CONNECTED;
-    } else {
-        WiFi.mode(WIFI_STA);
-        g_wifi_ui_state = WIFI_STATE_DISCONNECTED;
-    }
+    WiFi.mode(WIFI_STA);
+    g_wifi_ui_state = wifi_connected ? WIFI_STATE_CONNECTED : WIFI_STATE_DISCONNECTED;
     update_wifi_ui();
 }
 
@@ -410,9 +475,7 @@ static void wifi_setup(void) {
     prefs.end();
 
     if (ssid.length() == 0) {
-        Serial.println("[WiFi] No credentials saved.");
-        Serial.println("[WiFi] Use the WiFi screen to start captive portal,");
-        Serial.println("[WiFi] or send {\"wifi_config\":{\"ssid\":\"...\",\"pass\":\"...\"}} via serial.");
+        Serial.println("[WiFi] No credentials — use Settings > Setup WiFi");
         g_wifi_ui_state = WIFI_STATE_DISCONNECTED;
         g_wifi_ui_ssid[0] = '\0';
         g_wifi_ui_ip[0]   = '\0';
@@ -430,7 +493,7 @@ static void wifi_setup(void) {
     }
 
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("\n[WiFi] Failed — using USB serial only");
+        Serial.println("\n[WiFi] Failed — USB serial fallback");
         g_wifi_ui_state = WIFI_STATE_DISCONNECTED;
         strncpy(g_wifi_ui_ssid, ssid.c_str(), sizeof(g_wifi_ui_ssid) - 1);
         g_wifi_ui_ip[0] = '\0';
@@ -456,10 +519,19 @@ static void wifi_setup(void) {
     http_server.onNotFound(http_handle_not_found);
     http_server.begin();
     Serial.println("[HTTP] Server on port 80");
-    Serial.println("[OK] WiFi mode active — USB serial still works as fallback");
+
+    /* NTP */
+    load_tz_from_nvs();
+    apply_timezone();
+    update_tz_display();
+    Serial.printf("[NTP] Syncing (UTC%+d)...\n", g_tz_offset);
+
+    /* Initial weather fetch after a short delay for NTP to settle */
+    delay(1000);
+    fetch_weather();
+    last_weather_ms = millis();
 }
 
-/* Parses {"wifi_config":{"ssid":"...","pass":"..."}} and saves to NVS */
 static void handle_wifi_config(const char *buf) {
     auto extract = [](const char *src, const char *key, char *out, size_t out_len) -> bool {
         char search[64];
@@ -502,8 +574,8 @@ void setup() {
     Serial.begin(115200);
     delay(500);
     Serial.println("\n=================================");
-    Serial.println(" Claude Monitor CYD v3.1");
-    Serial.println(" Monitor + WiFi/HTTP + USB serial");
+    Serial.println(" Claude Monitor CYD v4.0");
+    Serial.println(" Clock + Weather + Reset countdown");
     Serial.println("=================================\n");
 
     lcd_init();
@@ -540,30 +612,49 @@ void setup() {
 void loop() {
     check_serial_data();
 
-    /* Handle AP portal requests from WiFi screen button */
-    if (g_request_ap_portal) {
-        g_request_ap_portal = false;
-        if (!ap_mode_active) {
-            start_ap_portal();
-        }
+    /* Clock update every second */
+    static unsigned long last_clock_ms = 0;
+    unsigned long now_ms = millis();
+    if (now_ms - last_clock_ms >= 1000UL) {
+        last_clock_ms = now_ms;
+        update_clock_and_countdown();
     }
 
+    /* Weather refresh every 15 minutes */
+    if (wifi_connected && (now_ms - last_weather_ms >= 15UL * 60UL * 1000UL)) {
+        last_weather_ms = now_ms;
+        fetch_weather();
+    }
+
+    /* Timezone change from [−]/[+] buttons in Settings */
+    if (g_tz_change != 0) {
+        g_tz_offset += g_tz_change;
+        if (g_tz_offset >  14) g_tz_offset =  14;
+        if (g_tz_offset < -12) g_tz_offset = -12;
+        g_tz_change = 0;
+        if (wifi_connected) apply_timezone();
+        save_tz_to_nvs();
+        update_tz_display();
+    }
+
+    /* AP portal button from Settings */
+    if (g_request_ap_portal) {
+        g_request_ap_portal = false;
+        if (!ap_mode_active) start_ap_portal();
+    }
     if (g_cancel_ap_portal) {
         g_cancel_ap_portal = false;
         stop_ap_portal();
     }
 
-    /* Service AP portal clients */
     if (ap_mode_active) {
         ap_server.handleClient();
-        /* Reboot after response has been sent */
         if (ap_reboot_pending) {
             delay(1000);
             ESP.restart();
         }
     }
 
-    /* Service STA HTTP monitor server */
     if (wifi_connected) {
         http_server.handleClient();
     }
