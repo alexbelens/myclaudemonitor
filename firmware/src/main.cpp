@@ -196,27 +196,31 @@ static void fetch_weather(void) {
     if (!wifi_connected || WiFi.status() != WL_CONNECTED) return;
     HTTPClient http;
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    http.begin("http://wttr.in/?format=%C+%t");
+    http.begin("http://wttr.in/Kharkiv?format=%C+%t");
     http.setTimeout(8000);
     int code = http.GET();
     if (code == 200) {
-        String body = http.getString();
-        body.trim();
+        /* Read stream directly — avoids String heap allocation on repeated calls */
+        WiFiClient *stream = http.getStreamPtr();
         char out[28] = {0};
         int oi = 0;
-        for (int i = 0; i < (int)body.length() && oi < 27; i++) {
-            uint8_t c = (uint8_t)body[i];
-            if (c >= 0x20) {
-                out[oi++] = (char)c;
+        unsigned long deadline = millis() + 3000;
+        while (oi < 27 && millis() < deadline) {
+            if (stream->available()) {
+                int c = stream->read();
+                if (c < 0) break;
+                if ((uint8_t)c >= 0x20) out[oi++] = (char)c;
             }
         }
         out[oi] = '\0';
+        Serial.printf("[Weather] HTTP %d oi=%d '%s'\n", code, oi, out);
         if (oi > 0) {
             strncpy(g_weather_str, out, sizeof(g_weather_str) - 1);
             update_weather_display(g_weather_str);
         }
+    } else {
+        Serial.printf("[Weather] HTTP %d\n", code);
     }
-    Serial.printf("[Weather] HTTP %d\n", code);
     http.end();
 }
 
