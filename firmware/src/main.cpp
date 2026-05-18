@@ -193,21 +193,20 @@ static void update_clock_and_countdown(void) {
 static unsigned long last_weather_ms = 0;
 
 static void fetch_weather(void) {
-    if (!wifi_connected) return;
+    if (!wifi_connected || WiFi.status() != WL_CONNECTED) return;
     HTTPClient http;
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     http.begin("http://wttr.in/?format=%C+%t");
     http.setTimeout(8000);
     int code = http.GET();
     if (code == 200) {
         String body = http.getString();
         body.trim();
-        /* Copy printable chars; skip non-ASCII control but keep UTF-8 sequences
-           (degree symbol U+00B0 = 0xC2 0xB0) */
         char out[28] = {0};
         int oi = 0;
         for (int i = 0; i < (int)body.length() && oi < 27; i++) {
             uint8_t c = (uint8_t)body[i];
-            if (c >= 0x20) {   /* printable or UTF-8 continuation */
+            if (c >= 0x20) {
                 out[oi++] = (char)c;
             }
         }
@@ -217,6 +216,7 @@ static void fetch_weather(void) {
             update_weather_display(g_weather_str);
         }
     }
+    Serial.printf("[Weather] HTTP %d\n", code);
     http.end();
 }
 
@@ -620,8 +620,8 @@ void loop() {
         update_clock_and_countdown();
     }
 
-    /* Weather refresh every 15 minutes */
-    if (wifi_connected && (now_ms - last_weather_ms >= 15UL * 60UL * 1000UL)) {
+    /* Weather refresh every 5 minutes */
+    if (wifi_connected && (now_ms - last_weather_ms >= 5UL * 60UL * 1000UL)) {
         last_weather_ms = now_ms;
         fetch_weather();
     }
