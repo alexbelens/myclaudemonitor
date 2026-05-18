@@ -392,6 +392,8 @@ static void update_weather_display(const char *raw) {
     parse_weather_str(raw);
     lv_label_set_text(lbl_weather_temp, g_weather_temp);
     lv_label_set_text(lbl_weather_cond, g_weather_cond);
+    lv_obj_invalidate(lbl_weather_temp);
+    lv_obj_invalidate(lbl_weather_cond);
 }
 
 /* ============================================================
