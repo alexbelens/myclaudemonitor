@@ -624,8 +624,8 @@ void loop() {
         update_clock_and_countdown();
     }
 
-    /* Weather refresh every 10 minutes */
-    if (wifi_connected && (now_ms - last_weather_ms >= 10UL * 60UL * 1000UL)) {
+    /* Weather refresh every 3 minutes */
+    if (wifi_connected && (now_ms - last_weather_ms >= 3UL * 60UL * 1000UL)) {
         last_weather_ms = now_ms;
         fetch_weather();
     }
