@@ -32,6 +32,10 @@ SERIAL_BAUD  = 115200
 
 # ── Claude.ai API ─────────────────────────────────────────────────────────────
 
+class SessionExpiredError(Exception):
+    pass
+
+
 def api_get(path: str, session_key: str) -> object:
     r = cf_requests.get(
         f"{CLAUDE_AI}{path}",
@@ -40,6 +44,8 @@ def api_get(path: str, session_key: str) -> object:
         impersonate="chrome120",
         timeout=10,
     )
+    if r.status_code in (401, 403):
+        raise SessionExpiredError(f"HTTP {r.status_code} — session key expired")
     r.raise_for_status()
     return r.json()
 
@@ -138,6 +144,12 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float):
     try:
         org_uuid = get_org_uuid(session_key)
         print(f"OK ({org_uuid[:8]}...)")
+    except SessionExpiredError:
+        print("FAILED — SESSION KEY EXPIRED")
+        print()
+        print("  Get a new key: claude.ai → DevTools → Application → Cookies → sessionKey")
+        print("  Then update --session-key in ~/Library/LaunchAgents/com.claude.cyd-bridge.plist")
+        sys.exit(1)
     except Exception as ex:
         print(f"FAILED: {ex}")
         print("Check your session key (--session-key).")
@@ -178,6 +190,10 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float):
         # Build payload
         try:
             payload = build_payload(session_key, org_uuid, plan)
+        except SessionExpiredError:
+            print("\r[SESSION EXPIRED] Get new sessionKey from claude.ai → update plist → restart bridge  ")
+            time.sleep(300)  # check again in 5 min, not every 30s
+            continue
         except Exception as ex:
             print(f"\r[ERR]  build_payload: {ex}  ", end="", flush=True)
             time.sleep(interval)
