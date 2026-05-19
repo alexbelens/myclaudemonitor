@@ -202,10 +202,10 @@ static void fetch_weather(void) {
     if (code == 200) {
         /* Read stream directly — avoids String heap allocation on repeated calls */
         WiFiClient *stream = http.getStreamPtr();
-        char out[28] = {0};
+        char out[64] = {0};
         int oi = 0;
         unsigned long deadline = millis() + 3000;
-        while (oi < 27 && millis() < deadline) {
+        while (oi < 63 && millis() < deadline) {
             if (stream->available()) {
                 int c = stream->read();
                 if (c < 0) break;
