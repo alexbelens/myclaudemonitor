@@ -166,8 +166,8 @@ static bool wifi_connected = false;
 static time_t g_reset_epoch = 0;   /* absolute time of next reset */
 
 static void update_reset_epoch(void) {
-    if (g_data.reset_min > 0) {
-        g_reset_epoch = time(nullptr) + (time_t)g_data.reset_min * 60;
+    if (g_data.fh_reset_min > 0) {
+        g_reset_epoch = time(nullptr) + (time_t)g_data.fh_reset_min * 60;
     }
 }
 

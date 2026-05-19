@@ -1,7 +1,7 @@
 /**
  * claude_monitor_ui.h — Portrait 240×320 dashboard
  *
- * Screen 0: Monitor  — clock, weather+icon, reset countdown, session, tokens
+ * Screen 0: Monitor  — clock, weather, 5h bar, 7d bar, plan name
  * Screen 1: Settings — WiFi setup + timezone
  */
 
@@ -24,27 +24,16 @@
  * DATA MODEL
  * ============================================================ */
 typedef struct {
-    int32_t tokens_used;
-    int32_t tokens_limit;
-    float   cost_used;
-    float   cost_limit;
-    int32_t msgs_used;
-    int32_t msgs_limit;
-    float   burn_rate;
-    float   cost_rate;
-    int32_t depletion_min;
-    int32_t reset_min;
-    int32_t session_elapsed_min;
-    int32_t session_total_min;
+    int32_t fh_pct;          /* 5-hour utilization 0-100 */
+    int32_t fh_reset_min;    /* minutes until 5h block resets */
+    int32_t sd_pct;          /* 7-day utilization 0-100 */
+    int32_t sd_reset_min;    /* minutes until 7d block resets */
+    int32_t warning_level;   /* 0=ok 1=50% 2=75% 3=90% */
     char    plan_name[16];
-    char    model[16];
-    int32_t model_pct;
-    int32_t warning_level;
 } claude_data_t;
 
 static claude_data_t g_data = {
-    0, 66593, 0.0f, 147.0f, 0, 260, 0.0f, 0.0f,
-    999, 300, 0, 300, "Pro", "--", 0, 0,
+    0, 300, 0, 10080, 0, "Pro",
 };
 
 /* ============================================================
@@ -100,17 +89,16 @@ static lv_obj_t *lbl_date;
 static lv_obj_t *lbl_weather_temp;
 static lv_obj_t *lbl_weather_cond;
 static lv_obj_t *accent_bar;
-/* Session mode (sess_pct < 100) */
-static lv_obj_t *lbl_sess_label;
-static lv_obj_t *lbl_session_pct;
-static lv_obj_t *bar_session;
-static lv_obj_t *lbl_time_remain;
-/* Reset mode (sess_pct >= 100) */
-static lv_obj_t *lbl_reset_in;
-static lv_obj_t *lbl_countdown;
-static lv_obj_t *lbl_tokens;
-static lv_obj_t *lbl_model;
-static lv_obj_t *lbl_msgs;
+/* 5H zone */
+static lv_obj_t *lbl_fh_pct;
+static lv_obj_t *bar_fh;
+static lv_obj_t *lbl_fh_remain;
+/* 7D zone */
+static lv_obj_t *lbl_sd_pct;
+static lv_obj_t *bar_sd;
+static lv_obj_t *lbl_sd_remain;
+/* Plan name */
+static lv_obj_t *lbl_plan_name;
 
 /* Settings */
 static lv_obj_t *lbl_wifi_state;
@@ -143,13 +131,14 @@ static void fmt_time(int minutes, char *buf, size_t len) {
     else        snprintf(buf, len, "%dm", m);
 }
 
-static void fmt_tokens(int32_t n, char *buf, size_t len) {
-    if (n < 1000)
-        snprintf(buf, len, "%d", (int)n);
-    else if (n < 1000000)
-        snprintf(buf, len, "%d,%03d", (int)(n/1000), (int)(n%1000));
-    else
-        snprintf(buf, len, "%dM", (int)(n/1000000));
+static void fmt_time_long(int minutes, char *buf, size_t len) {
+    if (minutes >= 24 * 60) {
+        int d = minutes / (24 * 60);
+        int h = (minutes % (24 * 60)) / 60;
+        snprintf(buf, len, "%dd %dh", d, h);
+    } else {
+        fmt_time(minutes, buf, len);
+    }
 }
 
 /* ============================================================
@@ -191,9 +180,8 @@ static const char* jfind(const char *json, const char *key) {
     p++; while (*p == ' ' || *p == '\t') p++;
     return p;
 }
-static int   jint(const char *j, const char *k, int d)   { const char *v=jfind(j,k); return v?atoi(v):d; }
-static float jflt(const char *j, const char *k, float d) { const char *v=jfind(j,k); return v?(float)atof(v):d; }
-static void  jstr(const char *j, const char *k, char *o, size_t l, const char *d) {
+static int  jint(const char *j, const char *k, int d) { const char *v=jfind(j,k); return v?atoi(v):d; }
+static void jstr(const char *j, const char *k, char *o, size_t l, const char *d) {
     const char *v = jfind(j, k);
     if (!v || *v != '"') { strncpy(o, d, l); return; }
     v++; size_t i=0; while (*v && *v!='"' && i<l-1) o[i++]=*v++; o[i]='\0';
@@ -203,22 +191,12 @@ static void  jstr(const char *j, const char *k, char *o, size_t l, const char *d
  * DATA LOADING
  * ============================================================ */
 static void load_data_from_json(const char *buf) {
-    g_data.tokens_used         = jint(buf, "tokens_used",         g_data.tokens_used);
-    g_data.tokens_limit        = jint(buf, "tokens_limit",        g_data.tokens_limit);
-    g_data.cost_used           = jflt(buf, "cost_used",           g_data.cost_used);
-    g_data.cost_limit          = jflt(buf, "cost_limit",          g_data.cost_limit);
-    g_data.msgs_used           = jint(buf, "msgs_used",           g_data.msgs_used);
-    g_data.msgs_limit          = jint(buf, "msgs_limit",          g_data.msgs_limit);
-    g_data.burn_rate           = jflt(buf, "burn_rate",           g_data.burn_rate);
-    g_data.cost_rate           = jflt(buf, "cost_rate",           g_data.cost_rate);
-    g_data.depletion_min       = jint(buf, "depletion_min",       g_data.depletion_min);
-    g_data.reset_min           = jint(buf, "reset_min",           g_data.reset_min);
-    g_data.session_elapsed_min = jint(buf, "session_elapsed_min", g_data.session_elapsed_min);
-    g_data.session_total_min   = jint(buf, "session_total_min",   g_data.session_total_min);
-    g_data.warning_level       = jint(buf, "warning_level",       g_data.warning_level);
-    g_data.model_pct           = jint(buf, "model_pct",           g_data.model_pct);
+    g_data.fh_pct       = jint(buf, "fh_pct",       g_data.fh_pct);
+    g_data.fh_reset_min = jint(buf, "fh_reset_min",  g_data.fh_reset_min);
+    g_data.sd_pct       = jint(buf, "sd_pct",        g_data.sd_pct);
+    g_data.sd_reset_min = jint(buf, "sd_reset_min",  g_data.sd_reset_min);
+    g_data.warning_level = jint(buf, "warning_level", g_data.warning_level);
     jstr(buf, "plan_name", g_data.plan_name, sizeof(g_data.plan_name), g_data.plan_name);
-    jstr(buf, "model",     g_data.model,     sizeof(g_data.model),     g_data.model);
 }
 
 #ifndef ESP32
@@ -360,28 +338,29 @@ static void create_tab_bar(lv_obj_t *scr, int active_idx) {
 }
 
 /* ============================================================
- * UPDATE: REALTIME — clock + date + countdown (called every second)
+ * UPDATE: REALTIME — clock + date + 5h remain (called every second)
  * ============================================================ */
 static void update_realtime_ui(const char *timebuf, const char *datebuf, int secs_left) {
     lv_label_set_text(lbl_clock, timebuf);
     if (datebuf && datebuf[0]) lv_label_set_text(lbl_date, datebuf);
 
+    char remain[20];
+    lv_color_t col;
     if (secs_left <= 0) {
-        lv_label_set_text(lbl_countdown, "0:00:00");
-        lv_obj_set_style_text_color(lbl_countdown, CM_RED, 0);
+        snprintf(remain, sizeof(remain), "resetting...");
+        col = CM_RED;
     } else {
         int h = secs_left / 3600;
         int m = (secs_left % 3600) / 60;
         int s = secs_left % 60;
-        char buf[12];
-        snprintf(buf, sizeof(buf), "%d:%02d:%02d", h, m, s);
-        lv_label_set_text(lbl_countdown, buf);
-
-        lv_color_t col = secs_left < 900  ? CM_RED    :
-                         secs_left < 1800 ? CM_ORANGE :
-                         secs_left < 3600 ? CM_YELLOW : CM_ACCENT;
-        lv_obj_set_style_text_color(lbl_countdown, col, 0);
+        if (h > 0) snprintf(remain, sizeof(remain), "%dh %02dm %02ds left", h, m, s);
+        else        snprintf(remain, sizeof(remain), "%dm %02ds left", m, s);
+        col = secs_left < 900  ? CM_RED    :
+              secs_left < 1800 ? CM_ORANGE :
+              secs_left < 3600 ? CM_YELLOW : CM_ACCENT;
     }
+    lv_label_set_text(lbl_fh_remain, remain);
+    lv_obj_set_style_text_color(lbl_fh_remain, col, 0);
 }
 
 /* ============================================================
@@ -439,79 +418,41 @@ static void update_wifi_ui(void) {
  * UPDATE: MONITOR DATA (called when bridge sends payload)
  * ============================================================ */
 static void update_ui(void) {
-    char tmp[48];
+    char tmp[32];
 
-    /* Accent stripe — reserved for air-raid alert status (TODO: wire up when token arrives) */
+    /* 5H bar */
+    snprintf(tmp, sizeof(tmp), "%d%%", g_data.fh_pct);
+    lv_label_set_text(lbl_fh_pct, tmp);
+    lv_bar_set_value(bar_fh, g_data.fh_pct, LV_ANIM_ON);
+    lv_obj_set_style_bg_color(bar_fh, warning_bar_color(g_data.fh_pct), LV_PART_INDICATOR);
 
-    /* Session percentage */
-    int sess_pct = (g_data.session_total_min > 0)
-        ? (int)((int64_t)g_data.session_elapsed_min * 100 / g_data.session_total_min) : 0;
-    if (sess_pct > 100) sess_pct = 100;
+    /* 7D bar */
+    snprintf(tmp, sizeof(tmp), "%d%%", g_data.sd_pct);
+    lv_label_set_text(lbl_sd_pct, tmp);
+    lv_bar_set_value(bar_sd, g_data.sd_pct, LV_ANIM_ON);
+    lv_obj_set_style_bg_color(bar_sd, warning_bar_color(g_data.sd_pct), LV_PART_INDICATOR);
 
-    int rem_min = g_data.session_total_min - g_data.session_elapsed_min;
-    if (rem_min < 0) rem_min = 0;
+    char remain[20];
+    fmt_time_long(g_data.sd_reset_min, remain, sizeof(remain));
+    snprintf(tmp, sizeof(tmp), "%s left", remain);
+    lv_label_set_text(lbl_sd_remain, tmp);
 
-    if (sess_pct >= 100) {
-        /* ── RESET IN mode ── */
-        lv_obj_add_flag(lbl_sess_label,  LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(lbl_session_pct, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(bar_session,     LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(lbl_time_remain, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(lbl_reset_in,  LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(lbl_countdown, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        /* ── SESSION mode ── */
-        lv_obj_clear_flag(lbl_sess_label,  LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(lbl_session_pct, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(bar_session,     LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(lbl_time_remain, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(lbl_reset_in,  LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(lbl_countdown, LV_OBJ_FLAG_HIDDEN);
-
-        snprintf(tmp, sizeof(tmp), "%d%%", sess_pct);
-        lv_label_set_text(lbl_session_pct, tmp);
-
-        lv_bar_set_value(bar_session, sess_pct, LV_ANIM_ON);
-        lv_obj_set_style_bg_color(bar_session, warning_bar_color(sess_pct), LV_PART_INDICATOR);
-
-        char remain[16];
-        fmt_time(rem_min, remain, sizeof(remain));
-        snprintf(tmp, sizeof(tmp), "%s left", remain);
-        lv_label_set_text(lbl_time_remain, tmp);
-    }
-
-    /* Tokens — large number, section header provides context */
-    char tok_buf[16];
-    fmt_tokens(g_data.tokens_used, tok_buf, sizeof(tok_buf));
-    lv_label_set_text(lbl_tokens, tok_buf);
-
-    /* Model */
-    snprintf(tmp, sizeof(tmp), "%s  %d%%", g_data.model, g_data.model_pct);
-    lv_label_set_text(lbl_model, tmp);
-
-    /* Msgs + burn rate */
-    int mph = (g_data.session_elapsed_min > 0)
-        ? (g_data.msgs_used * 60 / g_data.session_elapsed_min) : 0;
-    snprintf(tmp, sizeof(tmp), "Msgs %d/%d   %d msg/h",
-             g_data.msgs_used, g_data.msgs_limit, mph);
-    lv_label_set_text(lbl_msgs, tmp);
+    /* Plan name */
+    lv_label_set_text(lbl_plan_name, g_data.plan_name);
 }
 
 /* ============================================================
  * BUILD: MONITOR SCREEN
  *
- *  y=  0..70   Header: [dot] clock / date  |  temp / cond
- *  y= 70..73   Accent stripe
- *  y= 83..143  SESSION zone (shared, both modes end ~y=143)
- *               SESSION: label+% / bar / "Xh left"
- *               RESET IN: label / countdown (montserrat_28)
- *  y=148       Divider
- *  y=166       "TOKENS THIS SESSION"
- *  y=183       Token count (montserrat_28, centered)
- *  y=225       Divider
- *  y=235       Model + pct
- *  y=253       Msgs + burn
- *  y=276       Divider
+ *  y=  0.. 70  Header: clock / date  |  temp / cond
+ *  y= 70.. 73  Alert stripe (air-raid, pending API token)
+ *  y= 80..138  5H zone: label+% / bar / remain (ticking)
+ *  y=143       Divider
+ *  y=150..208  7D zone: label+% / bar / remain
+ *  y=213       Divider
+ *  y=230..268  Plan name (large, centered)
+ *  y=272       Divider
+ *  y=296       Tab bar
  * ============================================================ */
 static void build_monitor_screen(lv_obj_t *scr) {
     lv_obj_set_style_bg_color(scr, CM_BG, 0);
@@ -528,21 +469,18 @@ static void build_monitor_screen(lv_obj_t *scr) {
     lv_obj_set_style_pad_all(hdr, 0, 0);
     lv_obj_set_scrollbar_mode(hdr, LV_SCROLLBAR_MODE_OFF);
 
-    /* Clock — left, montserrat_28 */
     lbl_clock = lv_label_create(hdr);
     lv_label_set_text(lbl_clock, "--:--");
     lv_obj_set_style_text_font(lbl_clock, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(lbl_clock, CM_TEXT_PRIM, 0);
     lv_obj_set_pos(lbl_clock, 8, 4);
 
-    /* Date — left, montserrat_10, directly below clock */
     lbl_date = lv_label_create(hdr);
     lv_label_set_text(lbl_date, "---");
     lv_obj_set_style_text_font(lbl_date, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(lbl_date, CM_TEXT_SEC, 0);
     lv_obj_set_pos(lbl_date, 8, 44);
 
-    /* Weather temp — right column, montserrat_28, right-aligned */
     lbl_weather_temp = lv_label_create(hdr);
     lv_label_set_text(lbl_weather_temp, "--");
     lv_obj_set_style_text_font(lbl_weather_temp, &lv_font_montserrat_28, 0);
@@ -551,7 +489,6 @@ static void build_monitor_screen(lv_obj_t *scr) {
     lv_obj_set_width(lbl_weather_temp, 114);
     lv_obj_set_style_text_align(lbl_weather_temp, LV_TEXT_ALIGN_RIGHT, 0);
 
-    /* Weather cond — right column, montserrat_10, right-aligned, tight below temp */
     lbl_weather_cond = lv_label_create(hdr);
     lv_label_set_text(lbl_weather_cond, "--");
     lv_obj_set_style_text_font(lbl_weather_cond, &lv_font_montserrat_10, 0);
@@ -570,83 +507,62 @@ static void build_monitor_screen(lv_obj_t *scr) {
     lv_obj_set_style_radius(accent_bar, 0, 0);
     lv_obj_set_scrollbar_mode(accent_bar, LV_SCROLLBAR_MODE_OFF);
 
-    /* ── SESSION zone (y=83..143) ── */
+    /* ── 5H zone (y=80..138) ── */
+    make_label(scr, "5H", &lv_font_montserrat_10, CM_TEXT_SEC, 8, 82);
 
-    /* SESSION mode: label + % */
-    lbl_sess_label = lv_label_create(scr);
-    lv_label_set_text(lbl_sess_label, "SESSION");
-    lv_obj_set_style_text_font(lbl_sess_label, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(lbl_sess_label, CM_TEXT_SEC, 0);
-    lv_obj_set_pos(lbl_sess_label, 8, 83);
+    lbl_fh_pct = lv_label_create(scr);
+    lv_label_set_text(lbl_fh_pct, "0%");
+    lv_obj_set_style_text_font(lbl_fh_pct, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(lbl_fh_pct, CM_TEXT_PRIM, 0);
+    lv_obj_set_pos(lbl_fh_pct, 195, 82);
+    lv_obj_set_width(lbl_fh_pct, 37);
+    lv_obj_set_style_text_align(lbl_fh_pct, LV_TEXT_ALIGN_RIGHT, 0);
 
-    lbl_session_pct = lv_label_create(scr);
-    lv_label_set_text(lbl_session_pct, "0%");
-    lv_obj_set_style_text_font(lbl_session_pct, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(lbl_session_pct, CM_TEXT_PRIM, 0);
-    lv_obj_set_pos(lbl_session_pct, 195, 83);
-    lv_obj_set_width(lbl_session_pct, 37);
-    lv_obj_set_style_text_align(lbl_session_pct, LV_TEXT_ALIGN_RIGHT, 0);
+    bar_fh = make_bar(scr, CM_ACCENT, 6, 97, 228, 14);
 
-    /* SESSION mode: progress bar */
-    bar_session = make_bar(scr, CM_ACCENT, 6, 99, 228, 14);
+    lbl_fh_remain = lv_label_create(scr);
+    lv_label_set_text(lbl_fh_remain, "-- left");
+    lv_obj_set_style_text_font(lbl_fh_remain, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(lbl_fh_remain, CM_ACCENT, 0);
+    lv_obj_set_width(lbl_fh_remain, 240);
+    lv_obj_set_style_text_align(lbl_fh_remain, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(lbl_fh_remain, 0, 118);
 
-    /* SESSION mode: remaining time (montserrat_12, centered) */
-    lbl_time_remain = lv_label_create(scr);
-    lv_label_set_text(lbl_time_remain, "-- left");
-    lv_obj_set_style_text_font(lbl_time_remain, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(lbl_time_remain, CM_ACCENT, 0);
-    lv_obj_set_width(lbl_time_remain, 240);
-    lv_obj_set_style_text_align(lbl_time_remain, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(lbl_time_remain, 0, 120);
+    /* ── Divider ── */
+    make_divider(scr, 143, CM_DIVIDER);
 
-    /* RESET IN mode: label (hidden by default) */
-    lbl_reset_in = lv_label_create(scr);
-    lv_label_set_text(lbl_reset_in, "RESET IN");
-    lv_obj_set_style_text_font(lbl_reset_in, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(lbl_reset_in, CM_TEXT_DIM, 0);
-    lv_obj_set_width(lbl_reset_in, 240);
-    lv_obj_set_style_text_align(lbl_reset_in, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(lbl_reset_in, 0, 83);
-    lv_obj_add_flag(lbl_reset_in, LV_OBJ_FLAG_HIDDEN);
+    /* ── 7D zone (y=150..208) ── */
+    make_label(scr, "7D", &lv_font_montserrat_10, CM_TEXT_SEC, 8, 152);
 
-    /* RESET IN mode: countdown montserrat_28 (hidden by default) */
-    lbl_countdown = lv_label_create(scr);
-    lv_label_set_text(lbl_countdown, "0:00:00");
-    lv_obj_set_style_text_font(lbl_countdown, &lv_font_montserrat_28, 0);
-    lv_obj_set_style_text_color(lbl_countdown, CM_ACCENT, 0);
-    lv_obj_set_width(lbl_countdown, 240);
-    lv_obj_set_style_text_align(lbl_countdown, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(lbl_countdown, 0, 97);
-    lv_obj_add_flag(lbl_countdown, LV_OBJ_FLAG_HIDDEN);
+    lbl_sd_pct = lv_label_create(scr);
+    lv_label_set_text(lbl_sd_pct, "0%");
+    lv_obj_set_style_text_font(lbl_sd_pct, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(lbl_sd_pct, CM_TEXT_PRIM, 0);
+    lv_obj_set_pos(lbl_sd_pct, 195, 152);
+    lv_obj_set_width(lbl_sd_pct, 37);
+    lv_obj_set_style_text_align(lbl_sd_pct, LV_TEXT_ALIGN_RIGHT, 0);
 
-    /* ── Tokens ── */
-    make_divider(scr, 148, CM_DIVIDER);
+    bar_sd = make_bar(scr, CM_GREEN, 6, 167, 228, 14);
 
-    make_label(scr, "TOKENS THIS SESSION", &lv_font_montserrat_10, CM_TEXT_DIM, 8, 158);
+    lbl_sd_remain = lv_label_create(scr);
+    lv_label_set_text(lbl_sd_remain, "-- left");
+    lv_obj_set_style_text_font(lbl_sd_remain, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(lbl_sd_remain, CM_TEXT_SEC, 0);
+    lv_obj_set_width(lbl_sd_remain, 240);
+    lv_obj_set_style_text_align(lbl_sd_remain, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(lbl_sd_remain, 0, 188);
 
-    /* Token count — montserrat_28, centered */
-    lbl_tokens = lv_label_create(scr);
-    lv_label_set_text(lbl_tokens, "--");
-    lv_obj_set_style_text_font(lbl_tokens, &lv_font_montserrat_28, 0);
-    lv_obj_set_style_text_color(lbl_tokens, CM_ACCENT, 0);
-    lv_obj_set_width(lbl_tokens, 240);
-    lv_obj_set_style_text_align(lbl_tokens, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(lbl_tokens, 0, 174);
+    /* ── Divider ── */
+    make_divider(scr, 213, CM_DIVIDER);
 
-    /* ── Model + Msgs ── */
-    make_divider(scr, 218, CM_DIVIDER);
-
-    lbl_model = lv_label_create(scr);
-    lv_label_set_text(lbl_model, "--  0%");
-    lv_obj_set_style_text_font(lbl_model, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(lbl_model, CM_YELLOW, 0);
-    lv_obj_set_pos(lbl_model, 8, 228);
-
-    lbl_msgs = lv_label_create(scr);
-    lv_label_set_text(lbl_msgs, "Msgs --/--  -- msg/h");
-    lv_obj_set_style_text_font(lbl_msgs, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(lbl_msgs, CM_TEXT_SEC, 0);
-    lv_obj_set_pos(lbl_msgs, 8, 250);
+    /* ── Plan name (y=230, montserrat_28, centered) ── */
+    lbl_plan_name = lv_label_create(scr);
+    lv_label_set_text(lbl_plan_name, "Pro");
+    lv_obj_set_style_text_font(lbl_plan_name, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(lbl_plan_name, CM_ACCENT, 0);
+    lv_obj_set_width(lbl_plan_name, 240);
+    lv_obj_set_style_text_align(lbl_plan_name, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(lbl_plan_name, 0, 232);
 
     make_divider(scr, 272, CM_DIVIDER);
 

@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """
-bridge_auto.py — Auto-detecting bridge for Claude Monitor CYD.
+bridge_auto.py — Claude.ai API bridge for Claude Monitor CYD.
 
-Tries WiFi (claude-monitor.local) first, falls back to USB serial.
+Fetches real utilization from claude.ai (5h + 7d windows) and sends
+to CYD display via WiFi (claude-monitor.local) or USB serial fallback.
 
 Usage:
-    python3 scripts/bridge_auto.py --plan pro
+    python3 scripts/bridge_auto.py --session-key sk-ant-sid01-...
+
+Getting your session key:
+    1. Open claude.ai in browser, log in
+    2. DevTools → Application → Cookies → claude.ai
+    3. Copy the value of "sessionKey"
 """
 
 import argparse
@@ -17,87 +23,68 @@ import urllib.error
 import glob
 from datetime import datetime, timezone
 
-from claude_monitor.data.analysis import analyze_usage
-from claude_monitor.core.plans import Plans, get_token_limit, get_cost_limit
-
-
+CLAUDE_AI    = "https://claude.ai/api"
 WIFI_HOST    = "claude-monitor.local"
 WIFI_TIMEOUT = 3
 SERIAL_BAUD  = 115200
+UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 
 
-# ── Payload builder ───────────────────────────────────────────────────────────
+# ── Claude.ai API ─────────────────────────────────────────────────────────────
 
-def build_payload(plan: str) -> dict:
-    data   = analyze_usage(hours_back=192, quick_start=False, use_cache=False)
-    blocks = data.get("blocks", [])
-    token_limit = get_token_limit(plan, blocks)
-    cost_limit  = get_cost_limit(plan)
-    msg_limit   = Plans.get_message_limit(plan)
+def api_get(path: str, session_key: str) -> object:
+    req = urllib.request.Request(
+        f"{CLAUDE_AI}{path}",
+        headers={
+            "Cookie":       f"sessionKey={session_key}",
+            "User-Agent":   UA,
+            "Accept":       "application/json",
+            "Referer":      "https://claude.ai/",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read())
 
-    active_block = next((b for b in blocks if b.get("isActive", False)), None)
 
-    if active_block:
-        total_tokens = active_block.get("totalTokens", 0)
-        cost_used    = active_block.get("costUSD", 0.0)
-        messages     = active_block.get("sentMessagesCount", 0)
-        duration     = active_block.get("durationMinutes", 1) or 1
-        tc           = active_block.get("tokenCounts", {})
-        io_tokens    = tc.get("inputTokens", 0) + tc.get("outputTokens", 0)
-        burn_rate    = io_tokens / duration
+def get_org_id(session_key: str) -> str:
+    orgs = api_get("/organizations", session_key)
+    if not orgs:
+        raise RuntimeError("No organizations returned by API")
+    return orgs[0]["id"]
 
-        try:
-            end_time  = datetime.fromisoformat(str(active_block.get("endTime", "")))
-            reset_min = max(0, int((end_time - datetime.now(timezone.utc)).total_seconds() / 60))
-        except (ValueError, TypeError):
-            reset_min = 300
 
-        per_model   = active_block.get("perModelStats", {})
-        short_model, model_pct = "Sonnet", 0
-        if per_model:
-            total_entries = sum(s.get("entries_count", 0) for s in per_model.values())
-            for m, stats in per_model.items():
-                p = int(stats.get("entries_count", 0) * 100 / max(total_entries, 1))
-                if p > model_pct:
-                    model_pct = p
-                    ml = m.lower()
-                    short_model = ("Opus" if "opus" in ml
-                                   else "Haiku" if "haiku" in ml else "Sonnet")
+def parse_reset_min(resets_at: str) -> int:
+    if not resets_at:
+        return 300
+    try:
+        ts   = resets_at.replace("Z", "+00:00")
+        end  = datetime.fromisoformat(ts)
+        mins = int((end - datetime.now(timezone.utc)).total_seconds() / 60)
+        return max(0, mins)
+    except Exception:
+        return 300
 
-        projection   = active_block.get("projection", {})
-        if projection and "remainingMinutes" in projection:
-            depletion_min = int(projection["remainingMinutes"])
-        elif burn_rate > 0:
-            depletion_min = int(max(0, token_limit - total_tokens) / burn_rate)
-        else:
-            depletion_min = 999
-    else:
-        total_tokens = cost_used = messages = burn_rate = 0
-        reset_min, depletion_min, model_pct = 300, 999, 0
-        short_model = "--"
-        duration    = 1
 
-    pct     = total_tokens / token_limit if token_limit > 0 else 0
-    warning = 3 if pct >= 0.90 else 2 if pct >= 0.75 else 1 if pct >= 0.50 else 0
-    plan_cfg = Plans.get_plan_by_name(plan) or Plans.get_plan_by_name("custom")
+def build_payload(session_key: str, org_id: str, plan: str) -> dict:
+    usage = api_get(f"/organizations/{org_id}/usage", session_key)
+
+    fh = usage.get("five_hour", {})
+    sd = usage.get("seven_day", {})
+
+    fh_pct       = min(100, int(fh.get("utilization", 0.0) * 100))
+    sd_pct       = min(100, int(sd.get("utilization", 0.0) * 100))
+    fh_reset_min = parse_reset_min(fh.get("resets_at", ""))
+    sd_reset_min = parse_reset_min(sd.get("resets_at", ""))
+
+    warning = 3 if fh_pct >= 90 else 2 if fh_pct >= 75 else 1 if fh_pct >= 50 else 0
 
     return {
-        "tokens_used":         total_tokens,
-        "tokens_limit":        token_limit,
-        "cost_used":           round(cost_used, 2),
-        "cost_limit":          round(cost_limit, 2),
-        "msgs_used":           messages,
-        "msgs_limit":          msg_limit,
-        "burn_rate":           round(burn_rate, 1),
-        "cost_rate":           round(cost_used / duration, 4),
-        "depletion_min":       min(int(depletion_min), 999),
-        "reset_min":           min(reset_min, 300),
-        "session_elapsed_min": min(300 - reset_min, 300),
-        "session_total_min":   300,
-        "plan_name":           plan_cfg.display_name,
-        "model":               short_model,
-        "model_pct":           model_pct,
-        "warning_level":       warning,
+        "fh_pct":        fh_pct,
+        "fh_reset_min":  min(fh_reset_min, 300),
+        "sd_pct":        sd_pct,
+        "sd_reset_min":  min(sd_reset_min, 10080),
+        "warning_level": warning,
+        "plan_name":     plan.capitalize(),
     }
 
 
@@ -133,19 +120,30 @@ def find_serial_port(hint: str) -> str:
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
-def run_loop(plan: str, port_hint: str, interval: float):
-    import serial
+def run_loop(session_key: str, plan: str, port_hint: str, interval: float):
+    import serial  # noqa
 
-    mode           = None
-    ser            = None
+    mode             = None
+    ser              = None
+    org_id           = None
     wifi_check_every = 30
     last_wifi_check  = 0
 
-    print(f"Claude Monitor CYD — Auto Bridge")
+    print("Claude Monitor CYD — Bridge")
     print(f"  Plan:      {plan}")
     print(f"  Interval:  {interval}s")
     print(f"  WiFi:      {WIFI_HOST}")
     print()
+
+    # Fetch org ID once at startup
+    print("Fetching org ID from claude.ai... ", end="", flush=True)
+    try:
+        org_id = get_org_id(session_key)
+        print(f"OK ({org_id[:8]}...)")
+    except Exception as ex:
+        print(f"FAILED: {ex}")
+        print("Check your session key (--session-key).")
+        sys.exit(1)
 
     while True:
         now = time.time()
@@ -181,7 +179,7 @@ def run_loop(plan: str, port_hint: str, interval: float):
 
         # Build payload
         try:
-            payload = build_payload(plan)
+            payload = build_payload(session_key, org_id, plan)
         except Exception as ex:
             print(f"\r[ERR]  build_payload: {ex}  ", end="", flush=True)
             time.sleep(interval)
@@ -204,15 +202,13 @@ def run_loop(plan: str, port_hint: str, interval: float):
                 mode = None
 
         if ok:
-            pct    = int(payload["tokens_used"] * 100 / max(payload["tokens_limit"], 1))
             status = ["OK", "CAUTION", "WARNING", "CRITICAL"][payload["warning_level"]]
             tag    = "[WiFi]" if mode == "wifi" else "[USB] "
             print(
                 f"\r{tag} {payload['plan_name']}  "
-                f"Tok:{payload['tokens_used']:>6}/{payload['tokens_limit']}({pct}%)  "
-                f"${payload['cost_used']:.2f}  "
-                f"Msg:{payload['msgs_used']}/{payload['msgs_limit']}  "
-                f"{payload['model']} {payload['model_pct']}%  [{status}]  ",
+                f"5H:{payload['fh_pct']}%({payload['fh_reset_min']}m)  "
+                f"7D:{payload['sd_pct']}%({payload['sd_reset_min']}m)  "
+                f"[{status}]  ",
                 end="", flush=True,
             )
 
@@ -220,12 +216,15 @@ def run_loop(plan: str, port_hint: str, interval: float):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Auto bridge: WiFi first, USB fallback")
-    parser.add_argument("--plan", choices=["pro", "max5", "max20", "custom"],
-                        default="pro")
+    parser = argparse.ArgumentParser(description="Claude.ai API bridge for CYD")
+    parser.add_argument("--session-key", required=True,
+                        help="Claude.ai sessionKey cookie value (sk-ant-sid01-...)")
+    parser.add_argument("--plan", default="pro",
+                        help="Plan name shown on display (pro, max5, max20, ...)")
     parser.add_argument("--port", default="",
                         help="USB serial port hint (auto-detected if omitted)")
-    parser.add_argument("--interval", type=float, default=30.0)
+    parser.add_argument("--interval", type=float, default=30.0,
+                        help="Polling interval in seconds (default: 30)")
     args = parser.parse_args()
 
     try:
@@ -235,7 +234,7 @@ def main():
         sys.exit(1)
 
     try:
-        run_loop(args.plan, args.port, args.interval)
+        run_loop(args.session_key, args.plan, args.port, args.interval)
     except KeyboardInterrupt:
         print("\n\nBridge stopped.")
 
