@@ -2,20 +2,20 @@
 
 ## Project Overview
 
-Physical desktop dashboard for Claude Code usage monitoring on an ESP32-2432S028 "Cheap Yellow Display". Three-screen touchscreen UI showing real-time metrics from claude-monitor v3.1.
+Physical desktop dashboard for Claude.ai usage monitoring on an ESP32-2432S028 "Cheap Yellow Display". Two-screen touchscreen UI showing real-time utilization data fetched directly from the Claude.ai API.
 
 **Hardware**: ESP32 CYD (320x240 2.8" ILI9341 LCD, XPT2046 touch, CH340 USB, WiFi/BT)
-**Status**: Working on hardware with USB serial bridge. WiFi mode planned.
+**Status**: Working on hardware. WiFi mode primary, USB serial fallback.
 
 ## Architecture
 
 ```
-PC: bridge_combined.py (claude-monitor + win32gui) <--serial--> ESP32: LVGL UI
+Mac: bridge_auto.py (Claude.ai API) --WiFi/USB--> ESP32: LVGL UI
 ```
 
-- **Bridge** imports `claude_monitor.data.analysis.analyze_usage()` directly — same engine as terminal
-- **P90 limits** via `AdvancedCustomLimitDisplay._calculate_session_percentiles()`
-- **Bidirectional serial**: PC sends monitor data + window list, CYD sends switch commands + config changes
+- **Bridge** calls `claude.ai/api/organizations/{uuid}/usage` directly — accurate 5h + 7d utilization %
+- **Transport**: WiFi HTTP POST to `claude-monitor.local/api/monitor` (primary), USB serial fallback
+- **LaunchAgent**: `~/Library/LaunchAgents/com.claude.cyd-bridge.plist` (session key stored here, outside git)
 
 ## Project Structure
 
@@ -23,21 +23,18 @@ PC: bridge_combined.py (claude-monitor + win32gui) <--serial--> ESP32: LVGL UI
 claude-monitor-cyd/
 ├── firmware/                     # ESP32 PlatformIO project
 │   ├── platformio.ini
-│   ├── src/main.cpp              # Arduino: raw HSPI display + LVGL + touch + serial
+│   ├── src/main.cpp              # Arduino: HSPI display + LVGL + touch + WiFi + HTTP server
 │   └── include/
 │       ├── lv_conf.h             # LVGL 9.2: 16-bit, 48KB heap, BTN+BAR+LABEL only
 │       └── User_Setup.h          # TFT_eSPI CYD pins (HSPI: 13/12/14/15/2)
 ├── src/
-│   ├── main.c                    # PC simulator (SDL2)
-│   └── claude_monitor_ui.h       # SHARED UI: 3 screens (Monitor/Windows/Settings)
+│   └── claude_monitor_ui.h       # SHARED UI: 2 screens (Monitor/Settings)
 ├── scripts/
-│   ├── bridge_combined.py        # Main bridge: monitor + windows + config
-│   ├── bridge_live.py            # Monitor-only bridge
-│   ├── bridge_serial.py          # Basic serial bridge
-│   ├── bridge_claude_monitor.py  # Direct JSONL parser
-│   └── mock_data.py              # Mock data (zero deps)
-├── setup.sh / setup_windows.ps1  # PC simulator setup
-└── TODO.md                       # Full roadmap
+│   ├── bridge_auto.py            # Bridge: Claude.ai API → CYD display
+│   ├── mock_data.py              # Mock data for PC simulator
+│   └── setup_wifi.py             # WiFi provisioning helper
+├── setup.sh / setup_windows.ps1  # PC simulator setup (SDL2)
+└── TODO.md                       # Roadmap
 ```
 
 ## Key Technical Details
@@ -52,40 +49,59 @@ claude-monitor-cyd/
 - Color depth: 16-bit RGB565
 - Heap: 48KB
 - Draw buffer: 320 x 20 lines (partial rendering)
-- Fonts: Montserrat 10 + 12 only
+- Fonts: Montserrat 10 + 12 + 14 + 28
 - Widgets enabled: Label, Bar, Btn, Obj
 - NEON/Helium .S assembly files must be deleted after `pio run` (ARM-only, breaks Xtensa)
 
-### Serial Protocol
-- Baud: 115200
-- PC->CYD: `{"type":"monitor",...}\n` and `{"type":"windows","list":[...]}\n`
-- CYD->PC: `{"switch":<hwnd>}\n` and `{"config":{"plan":"...","view":"..."}}\n`
-- Routing: `route_serial_message()` checks `"type"` field
+### Data Model
+Bridge sends JSON payload every 30s:
+```json
+{
+  "fh_pct":        42,    // 5-hour utilization % (from Claude.ai API)
+  "fh_reset_min":  183,   // minutes until 5h block resets
+  "sd_pct":        15,    // 7-day utilization %
+  "sd_reset_min":  4320,  // minutes until 7d block resets
+  "warning_level": 1,     // 0=ok 1=50% 2=75% 3=90%
+  "plan_name":     "Pro"
+}
+```
 
-### Three Screens
-1. **Monitor**: cost/tokens/msgs bars, burn rate, cost rate, model, depletion
-2. **Windows**: 2x5 button grid of CLI windows, tap to switch (win32gui)
-3. **Settings**: plan selector (Custom/Pro/Max5/Max20), view selector (Realtime/Daily/Monthly)
+### Transport Protocol
+- Baud: 115200 (USB serial fallback)
+- PC→CYD: `{...}\n` JSON payload
+- WiFi: HTTP POST to `http://claude-monitor.local/api/monitor`
+
+### Two Screens
+1. **Monitor**: clock/date, weather (wttr.in), 5H bar + countdown, 7D bar, plan name
+2. **Settings**: WiFi provisioning (AP mode), timezone ±
+
+### Session Key
+- Stored in `~/Library/LaunchAgents/com.claude.cyd-bridge.plist` (outside git, never committed)
+- Get from: claude.ai → DevTools → Application → Cookies → `sessionKey`
+- Expires in weeks/months. Bridge prints `[SESSION EXPIRED]` in `/tmp/cyd-bridge.log` when it does.
 
 ## Build & Run
 
 ### Flash ESP32
-```powershell
+```bash
 cd firmware
-pio run -e cyd --target upload --upload-port COM3
-# NOTE: delete .pio/**/**.S files if NEON build errors occur
+# Delete ARM assembly files if build errors occur:
+find .pio -name "*.S" -delete
+~/.platformio/penv/bin/pio run -e cyd --target upload --upload-port /dev/cu.usbserial-1340
 ```
 
-### Run bridge
-```powershell
-uv tool run --from claude-monitor --with pyserial --with pywin32 python scripts/bridge_combined.py --port COM3
+### Run bridge manually
+```bash
+python3 scripts/bridge_auto.py --session-key sk-ant-sid02-...
 ```
 
-### PC simulator
-```powershell
-.\setup_windows.ps1
-python scripts\mock_data.py --demo
-.\lv_port_pc_vscode\bin\Release\main.exe
+### LaunchAgent (auto-start on login)
+```bash
+# Restart after plist changes:
+launchctl unload ~/Library/LaunchAgents/com.claude.cyd-bridge.plist
+launchctl load ~/Library/LaunchAgents/com.claude.cyd-bridge.plist
+# Check log:
+tail -f /tmp/cyd-bridge.log
 ```
 
 ## Coding Conventions
@@ -94,15 +110,14 @@ python scripts\mock_data.py --demo
 - C99 for UI header (ESP32 Arduino toolchain compatibility)
 - No dynamic allocation in UI — all objects created once at init
 - `#ifdef ESP32` guards for platform-specific code
-- `SERIAL_PRINTF` macro for CYD->PC output (maps to Serial.printf or printf)
+- `SERIAL_PRINTF` macro for debug output
 
 ### Python code (scripts/)
-- Bridge scripts import claude-monitor modules directly via `uv tool run --from claude-monitor`
-- Threading for bidirectional serial (listener thread + main loop)
-- `BridgeState` class for mutable config shared between threads
+- `curl_cffi` with `impersonate="chrome120"` required to bypass Cloudflare on claude.ai
+- `SessionExpiredError` raised on HTTP 401/403 — check for `[SESSION EXPIRED]` in log
 
 ## Related Projects
 
-- [claude-monitor](https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor) — data engine
 - [LVGL](https://lvgl.io/) — graphics library
 - [ESP32 CYD](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display) — hardware docs
+- [Usage4Claude](https://github.com/f-is-h/Usage4Claude) — macOS menu bar app using same API
