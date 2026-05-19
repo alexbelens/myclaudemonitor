@@ -12,14 +12,20 @@ A physical desktop dashboard for Claude.ai usage — built on an ESP32 "Cheap Ye
 - **7D bar** — 7-day rolling window utilization %
 - **Weather** — current conditions and temperature (wttr.in, refreshes every 3 min)
 - **Plan name** — Pro / Max5 / Max20
-- **Settings screen** — WiFi provisioning, timezone
+
+## Settings screen
+
+- **WiFi** — connect to new network via captive portal (CYD-Setup AP)
+- **Device #** — unique number per device; `1` → `claude-monitor.local`, `2` → `claude-monitor-2.local` (reboots to apply)
+- **Timezone** — UTC offset ±, saves to flash
+- **Sleep/Wake** — backlight schedule by hour; touch the screen to wake early
 
 Data comes directly from `claude.ai/api/organizations/{uuid}/usage` — the same numbers you see on the Claude.ai website.
 
 ## Requirements
 
 - ESP32-2432S028 CYD board
-- USB-C cable
+- USB-C cable (first flash only; OTA after that)
 - [PlatformIO](https://platformio.org/)
 - Python 3.10+ with `curl-cffi` and `pyserial`
 - A Claude.ai account (Pro or Max)
@@ -87,6 +93,38 @@ launchctl load ~/Library/LaunchAgents/com.claude.cyd-bridge.plist
 tail -f /tmp/cyd-bridge.log
 ```
 
+## OTA firmware updates
+
+After the first USB flash, all future updates go over WiFi — no cable needed:
+
+```bash
+cd firmware
+find .pio -name "*.S" -delete
+~/.platformio/penv/bin/pio run -e cyd_ota --target upload
+```
+
+The `cyd_ota` environment targets `claude-monitor.local` by default. For device #2 pass `--upload-port claude-monitor-2.local`.
+
+## Multiple devices
+
+Each CYD can be assigned a unique number in Settings → **Device #**:
+
+| Setting | mDNS hostname | Bridge flag |
+|---------|--------------|-------------|
+| 1 (default) | `claude-monitor.local` | *(none)* |
+| 2 | `claude-monitor-2.local` | `--host claude-monitor-2.local` |
+| 3 | `claude-monitor-3.local` | `--host claude-monitor-3.local` |
+
+Run a separate bridge process for each device:
+
+```bash
+# Device 1 (default)
+python3 scripts/bridge_auto.py --session-key sk-ant-...
+
+# Device 2
+python3 scripts/bridge_auto.py --session-key sk-ant-... --host claude-monitor-2.local
+```
+
 ## Session key expiry
 
 The session key lasts weeks to months. When it expires the bridge logs:
@@ -111,8 +149,9 @@ Mac: bridge_auto.py
 
 ESP32 CYD:
   ├─ HTTP server (port 80) — receives JSON payload
+  ├─ ArduinoOTA — WiFi firmware updates
   ├─ LVGL UI — 5H bar, 7D bar, weather, plan name
-  └─ WiFi provisioning + timezone settings
+  └─ Settings — WiFi, device #, timezone, sleep/wake schedule
 ```
 
 ## Project Structure
@@ -120,17 +159,17 @@ ESP32 CYD:
 ```
 claude-monitor-cyd/
 ├── firmware/
-│   ├── src/main.cpp              # ESP32: display, touch, WiFi, HTTP server, weather
+│   ├── platformio.ini            # cyd (USB) + cyd_ota (WiFi OTA) environments
+│   ├── src/main.cpp              # ESP32: display, touch, WiFi, HTTP, OTA, weather, sleep
 │   └── include/
 │       ├── lv_conf.h             # LVGL 9.2 config
 │       └── User_Setup.h          # CYD pin mappings
 ├── src/
-│   └── claude_monitor_ui.h       # LVGL UI (shared header)
+│   └── claude_monitor_ui.h       # LVGL UI — Monitor + Settings screens
 ├── scripts/
 │   ├── bridge_auto.py            # Bridge: Claude.ai API → CYD
 │   └── mock_data.py              # Fake data for simulator testing
-├── setup.sh / setup_windows.ps1  # PC simulator setup (SDL2)
-└── TODO.md
+└── setup.sh / setup_windows.ps1  # PC simulator setup (SDL2)
 ```
 
 ## Hardware Notes
@@ -140,6 +179,7 @@ claude-monitor-cyd/
 - **Orientation**: portrait 240×320, 180° rotation
 - **X-mirror fix**: pixels written in reverse column order in LVGL flush callback
 - **Touch fix**: `319 - x`, `239 - y` in touch callback
+- **Backlight**: GPIO 21 — LOW = off (sleep), HIGH = on
 
 ## Credits
 

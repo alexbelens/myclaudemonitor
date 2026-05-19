@@ -14,6 +14,7 @@
 #include <Preferences.h>
 #include <HTTPClient.h>
 #include <time.h>
+#include <ArduinoOTA.h>
 #include "lvgl.h"
 
 /* ============================================================
@@ -158,6 +159,7 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
  * Forward declarations
  * ============================================================ */
 static bool wifi_connected = false;
+static bool g_is_sleeping  = false;
 
 /* ============================================================
  * Clock + Countdown
@@ -244,6 +246,44 @@ static void save_tz_to_nvs(void) {
 
 static void apply_timezone(void) {
     configTime((long)g_tz_offset * 3600L, 0, "pool.ntp.org");
+}
+
+/* ============================================================
+ * Sleep schedule — NVS persistence
+ * ============================================================ */
+
+static void load_dev_from_nvs(void) {
+    Preferences prefs;
+    prefs.begin("cyd", true);
+    g_dev_num = prefs.getInt("dev_num", 1);
+    if (g_dev_num < 1) g_dev_num = 1;
+    if (g_dev_num > 9) g_dev_num = 9;
+    prefs.end();
+}
+
+static void save_dev_to_nvs(void) {
+    Preferences prefs;
+    prefs.begin("cyd", false);
+    prefs.putInt("dev_num", g_dev_num);
+    prefs.end();
+}
+
+static void load_sleep_from_nvs(void) {
+    Preferences prefs;
+    prefs.begin("cyd", true);
+    g_sleep_enabled = prefs.getBool("sleep_en", false);
+    g_sleep_hour    = prefs.getInt("sleep_h",   22);
+    g_wake_hour     = prefs.getInt("wake_h",    7);
+    prefs.end();
+}
+
+static void save_sleep_to_nvs(void) {
+    Preferences prefs;
+    prefs.begin("cyd", false);
+    prefs.putBool("sleep_en", g_sleep_enabled);
+    prefs.putInt("sleep_h",   g_sleep_hour);
+    prefs.putInt("wake_h",    g_wake_hour);
+    prefs.end();
 }
 
 /* ============================================================
@@ -514,8 +554,14 @@ static void wifi_setup(void) {
     strncpy(g_wifi_ui_ip,   ip.c_str(),   sizeof(g_wifi_ui_ip)   - 1);
     update_wifi_ui();
 
-    if (MDNS.begin("claude-monitor")) {
-        Serial.println("[mDNS] claude-monitor.local ready");
+    char hostname[32];
+    if (g_dev_num > 1)
+        snprintf(hostname, sizeof(hostname), "claude-monitor-%d", g_dev_num);
+    else
+        snprintf(hostname, sizeof(hostname), "claude-monitor");
+
+    if (MDNS.begin(hostname)) {
+        Serial.printf("[mDNS] %s.local ready\n", hostname);
     }
 
     http_server.on("/api/monitor", HTTP_POST, http_handle_monitor);
@@ -523,6 +569,10 @@ static void wifi_setup(void) {
     http_server.onNotFound(http_handle_not_found);
     http_server.begin();
     Serial.println("[HTTP] Server on port 80");
+
+    ArduinoOTA.setHostname(hostname);
+    ArduinoOTA.begin();
+    Serial.printf("[OTA] ArduinoOTA ready — upload to %s.local\n", hostname);
 
     /* NTP */
     load_tz_from_nvs();
@@ -603,6 +653,8 @@ void setup() {
     lv_indev_set_read_cb(indev, touch_read_cb);
     Serial.println("[OK] LVGL ready");
 
+    load_dev_from_nvs();
+    load_sleep_from_nvs();
     claude_monitor_create_ui();
     Serial.println("[OK] UI created");
 
@@ -641,6 +693,71 @@ void loop() {
         update_tz_display();
     }
 
+    /* Device number change — save + reboot to apply new hostname */
+    if (g_dev_num_change != 0) {
+        int next = g_dev_num + g_dev_num_change;
+        if (next >= 1 && next <= 9 && next != g_dev_num) {
+            g_dev_num = next;
+            save_dev_to_nvs();
+            update_dev_num_ui();
+            lv_timer_handler();
+            delay(400);
+            ESP.restart();
+        }
+        g_dev_num_change = 0;
+    }
+
+    /* Sleep toggle from Settings */
+    if (g_sleep_toggle != 0) {
+        g_sleep_enabled = (g_sleep_toggle > 0);
+        g_sleep_toggle  = 0;
+        if (!g_sleep_enabled && g_is_sleeping) {
+            g_is_sleeping = false;
+            digitalWrite(LCD_BL, HIGH);
+        }
+        save_sleep_to_nvs();
+        update_sleep_ui();
+    }
+
+    /* Sleep/wake hour adjustments */
+    if (g_sleep_hour_change != 0) {
+        g_sleep_hour = (g_sleep_hour + g_sleep_hour_change + 24) % 24;
+        g_sleep_hour_change = 0;
+        save_sleep_to_nvs();
+        update_sleep_ui();
+    }
+    if (g_wake_hour_change != 0) {
+        g_wake_hour = (g_wake_hour + g_wake_hour_change + 24) % 24;
+        g_wake_hour_change = 0;
+        save_sleep_to_nvs();
+        update_sleep_ui();
+    }
+
+    /* Touch wake: any touch while sleeping turns backlight back on */
+    if (g_is_sleeping && ts.touched()) {
+        g_is_sleeping = false;
+        digitalWrite(LCD_BL, HIGH);
+    }
+
+    /* Sleep schedule check — every 60 s */
+    static unsigned long last_sleep_check_ms = 0;
+    if (g_sleep_enabled && (now_ms - last_sleep_check_ms >= 60000UL)) {
+        last_sleep_check_ms = now_ms;
+        struct tm ti;
+        if (getLocalTime(&ti)) {
+            int h = ti.tm_hour;
+            bool should;
+            if (g_sleep_hour < g_wake_hour)
+                should = (h >= g_sleep_hour && h < g_wake_hour);
+            else
+                should = (h >= g_sleep_hour || h < g_wake_hour);
+            if (should != g_is_sleeping) {
+                g_is_sleeping = should;
+                digitalWrite(LCD_BL, g_is_sleeping ? LOW : HIGH);
+            }
+        }
+    }
+
     /* AP portal button from Settings */
     if (g_request_ap_portal) {
         g_request_ap_portal = false;
@@ -661,6 +778,7 @@ void loop() {
 
     if (wifi_connected) {
         http_server.handleClient();
+        ArduinoOTA.handle();
     }
 
     uint32_t wait = lv_timer_handler();

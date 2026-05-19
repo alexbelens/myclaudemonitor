@@ -12,6 +12,8 @@
 - WiFi transport (claude-monitor.local) + USB serial fallback
 - LaunchAgent auto-start on login
 - Session key expiry detection (`[SESSION EXPIRED]` in log)
+- ArduinoOTA — WiFi flash via `pio run -e cyd_ota --target upload`
+- Sleep/wake schedule — backlight off/on by hour, configurable in Settings screen, NVS persistence, touch-to-wake
 
 ## Pending
 

@@ -55,6 +55,18 @@ static char g_wifi_ui_ip[32]   = {0};
 static bool g_request_ap_portal = false;
 static bool g_cancel_ap_portal  = false;
 
+/* Device number — 1 → claude-monitor.local, 2 → claude-monitor-2.local */
+static int  g_dev_num        = 1;
+static int  g_dev_num_change = 0;   /* -1 or +1 */
+
+/* Sleep/wake schedule */
+static bool g_sleep_enabled     = false;
+static int  g_sleep_hour        = 22;
+static int  g_wake_hour         = 7;
+static int  g_sleep_toggle      = 0;    /* +1=enable, -1=disable */
+static int  g_sleep_hour_change = 0;    /* -1 or +1 */
+static int  g_wake_hour_change  = 0;    /* -1 or +1 */
+
 /* ============================================================
  * COLORS — Dark Navy + Electric Cyan
  * ============================================================ */
@@ -100,13 +112,22 @@ static lv_obj_t *lbl_sd_remain;
 /* Plan name */
 static lv_obj_t *lbl_plan_name;
 
-/* Settings */
+/* Settings — WiFi */
 static lv_obj_t *lbl_wifi_state;
 static lv_obj_t *lbl_wifi_ssid_val;
 static lv_obj_t *lbl_wifi_ip_val;
 static lv_obj_t *btn_wifi_action;
 static lv_obj_t *lbl_btn_wifi_action;
+static lv_obj_t *lbl_dev_num;
 static lv_obj_t *lbl_tz;
+
+/* Settings — sleep/wake */
+static lv_obj_t *btn_sleep_on;
+static lv_obj_t *lbl_btn_sleep_on;
+static lv_obj_t *btn_sleep_off;
+static lv_obj_t *lbl_btn_sleep_off;
+static lv_obj_t *lbl_sleep_hour;
+static lv_obj_t *lbl_wake_hour;
 
 /* ============================================================
  * HELPERS
@@ -234,6 +255,14 @@ static void wifi_action_btn_cb(lv_event_t *e) {
 }
 static void tz_minus_cb(lv_event_t *e) { (void)e; g_tz_change = -1; }
 static void tz_plus_cb(lv_event_t *e)  { (void)e; g_tz_change = +1; }
+static void dev_num_minus_cb(lv_event_t *e) { (void)e; g_dev_num_change = -1; }
+static void dev_num_plus_cb(lv_event_t *e)  { (void)e; g_dev_num_change = +1; }
+static void sleep_on_cb(lv_event_t *e)      { (void)e; g_sleep_toggle = 1; }
+static void sleep_off_cb(lv_event_t *e)     { (void)e; g_sleep_toggle = -1; }
+static void sleep_h_minus_cb(lv_event_t *e) { (void)e; g_sleep_hour_change = -1; }
+static void sleep_h_plus_cb(lv_event_t *e)  { (void)e; g_sleep_hour_change = +1; }
+static void wake_h_minus_cb(lv_event_t *e)  { (void)e; g_wake_hour_change = -1; }
+static void wake_h_plus_cb(lv_event_t *e)   { (void)e; g_wake_hour_change = +1; }
 
 /* ============================================================
  * WIDGET HELPERS
@@ -383,6 +412,38 @@ static void update_tz_display(void) {
     if (g_tz_offset >= 0) snprintf(buf, sizeof(buf), "UTC+%d", g_tz_offset);
     else                   snprintf(buf, sizeof(buf), "UTC%d",  g_tz_offset);
     lv_label_set_text(lbl_tz, buf);
+}
+
+/* ============================================================
+ * UPDATE: DEVICE NUMBER UI in Settings
+ * ============================================================ */
+static void update_dev_num_ui(void) {
+    char buf[4];
+    snprintf(buf, sizeof(buf), "%d", g_dev_num);
+    lv_label_set_text(lbl_dev_num, buf);
+}
+
+/* ============================================================
+ * UPDATE: SLEEP/WAKE UI in Settings
+ * ============================================================ */
+static void update_sleep_ui(void) {
+    char buf[8];
+    lv_obj_set_style_bg_color(btn_sleep_on,
+        g_sleep_enabled ? CM_ACCENT : CM_BTN_BG, 0);
+    lv_obj_set_style_border_color(btn_sleep_on,
+        g_sleep_enabled ? CM_ACCENT : CM_DIVIDER, 0);
+    lv_obj_set_style_text_color(lbl_btn_sleep_on,
+        g_sleep_enabled ? CM_BG : CM_TEXT_SEC, 0);
+    lv_obj_set_style_bg_color(btn_sleep_off,
+        !g_sleep_enabled ? CM_BTN_PRESS : CM_BTN_BG, 0);
+    lv_obj_set_style_border_color(btn_sleep_off,
+        !g_sleep_enabled ? CM_RED : CM_DIVIDER, 0);
+    lv_obj_set_style_text_color(lbl_btn_sleep_off,
+        !g_sleep_enabled ? CM_TEXT_PRIM : CM_TEXT_DIM, 0);
+    snprintf(buf, sizeof(buf), "%02d:00", g_sleep_hour);
+    lv_label_set_text(lbl_sleep_hour, buf);
+    snprintf(buf, sizeof(buf), "%02d:00", g_wake_hour);
+    lv_label_set_text(lbl_wake_hour, buf);
 }
 
 /* ============================================================
@@ -571,6 +632,16 @@ static void build_monitor_screen(lv_obj_t *scr) {
 
 /* ============================================================
  * BUILD: SETTINGS SCREEN
+ *
+ *  y=  0.. 40  Header
+ *  y= 40       Accent divider
+ *  y= 42..144  WiFi section (state / SSID / IP / Device# / button)
+ *  y=146       Divider
+ *  y=148..192  Timezone section
+ *  y=196       Divider
+ *  y=198..284  Sleep/Wake section
+ *  y=286       Divider
+ *  y=296       Tab bar
  * ============================================================ */
 static void build_settings_screen(lv_obj_t *scr) {
     lv_obj_set_style_bg_color(scr, CM_BG, 0);
@@ -586,7 +657,6 @@ static void build_settings_screen(lv_obj_t *scr) {
     lv_obj_set_style_radius(hdr, 0, 0);
     lv_obj_set_style_pad_all(hdr, 0, 0);
     lv_obj_set_scrollbar_mode(hdr, LV_SCROLLBAR_MODE_OFF);
-
     lv_obj_t *ht = lv_label_create(hdr);
     lv_label_set_text(ht, "Settings");
     lv_obj_set_style_text_font(ht, &lv_font_montserrat_14, 0);
@@ -595,32 +665,45 @@ static void build_settings_screen(lv_obj_t *scr) {
 
     make_divider(scr, 40, CM_ACCENT);
 
-    /* ── WiFi section ── */
-    make_label(scr, "WIFI", &lv_font_montserrat_10, CM_TEXT_DIM, 10, 52);
+    /* ── WiFi section (y=42..144) ── */
+    make_label(scr, "WIFI", &lv_font_montserrat_10, CM_TEXT_DIM, 10, 44);
 
     lbl_wifi_state = lv_label_create(scr);
     lv_label_set_text(lbl_wifi_state, "Not connected");
     lv_obj_set_style_text_font(lbl_wifi_state, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(lbl_wifi_state, CM_RED, 0);
-    lv_obj_set_pos(lbl_wifi_state, 10, 68);
+    lv_obj_set_pos(lbl_wifi_state, 10, 56);
 
-    make_label(scr, "SSID:", &lv_font_montserrat_10, CM_TEXT_DIM, 10, 92);
+    make_label(scr, "SSID:", &lv_font_montserrat_10, CM_TEXT_DIM, 10, 70);
     lbl_wifi_ssid_val = lv_label_create(scr);
     lv_label_set_text(lbl_wifi_ssid_val, "--");
     lv_obj_set_style_text_font(lbl_wifi_ssid_val, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(lbl_wifi_ssid_val, CM_TEXT_PRIM, 0);
-    lv_obj_set_pos(lbl_wifi_ssid_val, 50, 92);
+    lv_obj_set_pos(lbl_wifi_ssid_val, 50, 70);
 
-    make_label(scr, "IP:", &lv_font_montserrat_10, CM_TEXT_DIM, 10, 108);
+    make_label(scr, "IP:", &lv_font_montserrat_10, CM_TEXT_DIM, 10, 82);
     lbl_wifi_ip_val = lv_label_create(scr);
     lv_label_set_text(lbl_wifi_ip_val, "--");
     lv_obj_set_style_text_font(lbl_wifi_ip_val, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(lbl_wifi_ip_val, CM_TEXT_PRIM, 0);
-    lv_obj_set_pos(lbl_wifi_ip_val, 50, 108);
+    lv_obj_set_pos(lbl_wifi_ip_val, 50, 82);
+
+    /* Device number row */
+    make_label(scr, "Device #:", &lv_font_montserrat_10, CM_TEXT_DIM, 10, 96);
+    make_btn(scr, "-", 80, 92, 26, 20, dev_num_minus_cb, NULL);
+    lbl_dev_num = lv_label_create(scr);
+    lv_label_set_text(lbl_dev_num, "1");
+    lv_obj_set_style_text_font(lbl_dev_num, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(lbl_dev_num, CM_ACCENT, 0);
+    lv_obj_set_width(lbl_dev_num, 20);
+    lv_obj_set_style_text_align(lbl_dev_num, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(lbl_dev_num, 108, 96);
+    make_btn(scr, "+", 130, 92, 26, 20, dev_num_plus_cb, NULL);
+    make_label(scr, "(reboots)", &lv_font_montserrat_10, CM_TEXT_DIM, 160, 96);
 
     btn_wifi_action = lv_btn_create(scr);
-    lv_obj_set_size(btn_wifi_action, 220, 44);
-    lv_obj_set_pos(btn_wifi_action, 10, 126);
+    lv_obj_set_size(btn_wifi_action, 220, 28);
+    lv_obj_set_pos(btn_wifi_action, 10, 116);
     lv_obj_set_style_bg_color(btn_wifi_action, CM_BTN_BG, 0);
     lv_obj_set_style_bg_opa(btn_wifi_action, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(btn_wifi_action, CM_BTN_PRESS, LV_STATE_PRESSED);
@@ -635,15 +718,11 @@ static void build_settings_screen(lv_obj_t *scr) {
     lv_obj_set_style_text_color(lbl_btn_wifi_action, CM_TEXT_PRIM, 0);
     lv_obj_align(lbl_btn_wifi_action, LV_ALIGN_CENTER, 0, 0);
 
-    make_label(scr, "Connect to 'CYD-Setup' WiFi -> 192.168.4.1",
-               &lv_font_montserrat_10, CM_TEXT_DIM, 10, 178);
+    /* ── Timezone section (y=148..192) ── */
+    make_divider(scr, 146, CM_DIVIDER);
+    make_label(scr, "TIMEZONE", &lv_font_montserrat_10, CM_TEXT_DIM, 10, 150);
 
-    /* ── Timezone section ── */
-    make_divider(scr, 198, CM_DIVIDER);
-
-    make_label(scr, "CLOCK TIMEZONE", &lv_font_montserrat_10, CM_TEXT_DIM, 10, 210);
-
-    make_btn(scr, "-", 10, 228, 50, 40, tz_minus_cb, NULL);
+    make_btn(scr, "-", 10, 163, 50, 28, tz_minus_cb, NULL);
 
     lbl_tz = lv_label_create(scr);
     lv_label_set_text(lbl_tz, "UTC+3");
@@ -651,12 +730,71 @@ static void build_settings_screen(lv_obj_t *scr) {
     lv_obj_set_style_text_color(lbl_tz, CM_ACCENT, 0);
     lv_obj_set_width(lbl_tz, 100);
     lv_obj_set_style_text_align(lbl_tz, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(lbl_tz, 68, 238);
+    lv_obj_set_pos(lbl_tz, 68, 168);
 
-    make_btn(scr, "+", 180, 228, 50, 40, tz_plus_cb, NULL);
+    make_btn(scr, "+", 180, 163, 50, 28, tz_plus_cb, NULL);
 
-    make_label(scr, "Saves automatically",
-               &lv_font_montserrat_10, CM_TEXT_DIM, 10, 278);
+    /* ── Sleep/Wake section (y=198..284) ── */
+    make_divider(scr, 196, CM_DIVIDER);
+    make_label(scr, "SLEEP / WAKE", &lv_font_montserrat_10, CM_TEXT_DIM, 10, 200);
+
+    btn_sleep_on = lv_btn_create(scr);
+    lv_obj_set_size(btn_sleep_on, 106, 22);
+    lv_obj_set_pos(btn_sleep_on, 8, 212);
+    lv_obj_set_style_bg_color(btn_sleep_on, CM_BTN_BG, 0);
+    lv_obj_set_style_bg_opa(btn_sleep_on, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(btn_sleep_on, CM_BTN_PRESS, LV_STATE_PRESSED);
+    lv_obj_set_style_radius(btn_sleep_on, 6, 0);
+    lv_obj_set_style_border_width(btn_sleep_on, 1, 0);
+    lv_obj_set_style_border_color(btn_sleep_on, CM_DIVIDER, 0);
+    lv_obj_set_style_pad_all(btn_sleep_on, 0, 0);
+    lv_obj_add_event_cb(btn_sleep_on, sleep_on_cb, LV_EVENT_CLICKED, NULL);
+    lbl_btn_sleep_on = lv_label_create(btn_sleep_on);
+    lv_label_set_text(lbl_btn_sleep_on, "Enabled");
+    lv_obj_set_style_text_font(lbl_btn_sleep_on, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(lbl_btn_sleep_on, CM_TEXT_SEC, 0);
+    lv_obj_align(lbl_btn_sleep_on, LV_ALIGN_CENTER, 0, 0);
+
+    btn_sleep_off = lv_btn_create(scr);
+    lv_obj_set_size(btn_sleep_off, 106, 22);
+    lv_obj_set_pos(btn_sleep_off, 120, 212);
+    lv_obj_set_style_bg_color(btn_sleep_off, CM_BTN_BG, 0);
+    lv_obj_set_style_bg_opa(btn_sleep_off, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(btn_sleep_off, CM_BTN_PRESS, LV_STATE_PRESSED);
+    lv_obj_set_style_radius(btn_sleep_off, 6, 0);
+    lv_obj_set_style_border_width(btn_sleep_off, 1, 0);
+    lv_obj_set_style_border_color(btn_sleep_off, CM_DIVIDER, 0);
+    lv_obj_set_style_pad_all(btn_sleep_off, 0, 0);
+    lv_obj_add_event_cb(btn_sleep_off, sleep_off_cb, LV_EVENT_CLICKED, NULL);
+    lbl_btn_sleep_off = lv_label_create(btn_sleep_off);
+    lv_label_set_text(lbl_btn_sleep_off, "Disabled");
+    lv_obj_set_style_text_font(lbl_btn_sleep_off, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(lbl_btn_sleep_off, CM_TEXT_PRIM, 0);
+    lv_obj_align(lbl_btn_sleep_off, LV_ALIGN_CENTER, 0, 0);
+
+    make_label(scr, "Sleep:", &lv_font_montserrat_10, CM_TEXT_SEC, 8, 242);
+    make_btn(scr, "-", 72, 238, 26, 22, sleep_h_minus_cb, NULL);
+    lbl_sleep_hour = lv_label_create(scr);
+    lv_label_set_text(lbl_sleep_hour, "22:00");
+    lv_obj_set_style_text_font(lbl_sleep_hour, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(lbl_sleep_hour, CM_ACCENT, 0);
+    lv_obj_set_width(lbl_sleep_hour, 44);
+    lv_obj_set_style_text_align(lbl_sleep_hour, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(lbl_sleep_hour, 100, 242);
+    make_btn(scr, "+", 146, 238, 26, 22, sleep_h_plus_cb, NULL);
+
+    make_label(scr, "Wake: ", &lv_font_montserrat_10, CM_TEXT_SEC, 8, 266);
+    make_btn(scr, "-", 72, 262, 26, 22, wake_h_minus_cb, NULL);
+    lbl_wake_hour = lv_label_create(scr);
+    lv_label_set_text(lbl_wake_hour, "07:00");
+    lv_obj_set_style_text_font(lbl_wake_hour, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(lbl_wake_hour, CM_ACCENT, 0);
+    lv_obj_set_width(lbl_wake_hour, 44);
+    lv_obj_set_style_text_align(lbl_wake_hour, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(lbl_wake_hour, 100, 266);
+    make_btn(scr, "+", 146, 262, 26, 22, wake_h_plus_cb, NULL);
+
+    make_divider(scr, 286, CM_DIVIDER);
 
     create_tab_bar(scr, 1);
 }
@@ -680,7 +818,9 @@ static void claude_monitor_create_ui(void) {
 
     current_screen = 0;
     update_wifi_ui();
+    update_dev_num_ui();
     update_tz_display();
+    update_sleep_ui();
 
 #ifndef ESP32
     lv_timer_create(data_poll_cb, 2000, NULL);

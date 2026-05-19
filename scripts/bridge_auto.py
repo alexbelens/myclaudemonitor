@@ -25,7 +25,6 @@ from datetime import datetime, timezone
 from curl_cffi import requests as cf_requests
 
 CLAUDE_AI    = "https://claude.ai/api"
-WIFI_HOST    = "claude-monitor.local"
 WIFI_TIMEOUT = 3
 SERIAL_BAUD  = 115200
 
@@ -94,20 +93,20 @@ def build_payload(session_key: str, org_uuid: str, plan: str) -> dict:
 
 # ── Transport helpers ─────────────────────────────────────────────────────────
 
-def wifi_available() -> bool:
+def wifi_available(host: str) -> bool:
     try:
-        url = f"http://{WIFI_HOST}/api/status"
+        url = f"http://{host}/api/status"
         with urllib.request.urlopen(url, timeout=WIFI_TIMEOUT) as r:
             return r.status == 200
     except Exception:
         return False
 
 
-def send_wifi(payload: dict) -> bool:
+def send_wifi(payload: dict, host: str) -> bool:
     try:
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         req  = urllib.request.Request(
-            f"http://{WIFI_HOST}/api/monitor", data=body,
+            f"http://{host}/api/monitor", data=body,
             headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=WIFI_TIMEOUT) as r:
             return r.status == 200
@@ -124,7 +123,7 @@ def find_serial_port(hint: str) -> str:
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
-def run_loop(session_key: str, plan: str, port_hint: str, interval: float):
+def run_loop(session_key: str, plan: str, port_hint: str, interval: float, wifi_host: str):
     import serial  # noqa
 
     mode             = None
@@ -136,7 +135,7 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float):
     print("Claude Monitor CYD — Bridge")
     print(f"  Plan:      {plan}")
     print(f"  Interval:  {interval}s")
-    print(f"  WiFi:      {WIFI_HOST}")
+    print(f"  WiFi:      {wifi_host}")
     print()
 
     # Fetch org ID once at startup
@@ -161,14 +160,14 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float):
         # Mode detection
         if mode != "wifi" and (now - last_wifi_check > wifi_check_every or mode is None):
             last_wifi_check = now
-            if wifi_available():
+            if wifi_available(wifi_host):
                 if mode != "wifi":
                     if ser:
                         try: ser.close()
                         except Exception: pass
                         ser = None
                     mode = "wifi"
-                    print(f"\r[WiFi] Connected to {WIFI_HOST}            ")
+                    print(f"\r[WiFi] Connected to {wifi_host}            ")
 
         if mode != "wifi":
             if ser is None:
@@ -202,7 +201,7 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float):
         # Send
         ok = False
         if mode == "wifi":
-            ok = send_wifi(payload)
+            ok = send_wifi(payload, wifi_host)
             if not ok:
                 mode = None
                 last_wifi_check = 0
@@ -239,6 +238,9 @@ def main():
                         help="USB serial port hint (auto-detected if omitted)")
     parser.add_argument("--interval", type=float, default=30.0,
                         help="Polling interval in seconds (default: 30)")
+    parser.add_argument("--host", default="claude-monitor.local",
+                        help="CYD mDNS hostname (default: claude-monitor.local; "
+                             "use claude-monitor-2.local for device #2)")
     args = parser.parse_args()
 
     try:
@@ -248,7 +250,7 @@ def main():
         sys.exit(1)
 
     try:
-        run_loop(args.session_key, args.plan, args.port, args.interval)
+        run_loop(args.session_key, args.plan, args.port, args.interval, args.host)
     except KeyboardInterrupt:
         print("\n\nBridge stopped.")
 
