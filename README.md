@@ -1,140 +1,151 @@
 # Claude Monitor CYD
 
-A physical desktop dashboard that displays real-time Claude Code usage on an ESP32 "Cheap Yellow Display" (CYD). Shows the same data as `claude-monitor --view realtime` on a touchscreen you can place on your desk.
+A physical desktop dashboard for Claude.ai usage — built on an ESP32 "Cheap Yellow Display". Shows real utilization data fetched directly from the Claude.ai API, displayed on a 2.8" touchscreen you can place on your desk.
 
-**Hardware**: ESP32-2432S028 (~$15) | **Display**: 320x240 ILI9341 touchscreen | **Connection**: USB serial (WiFi planned)
+**Hardware**: ESP32-2432S028 (~$15) | **Display**: 320×240 ILI9341 touchscreen | **Connection**: WiFi (USB serial fallback)
 
-## Features
+![Monitor screen showing 5H and 7D utilization bars](docs/screen.jpg)
 
-- **Real-time monitoring** — cost, tokens, messages usage with P90 dynamic limits
-- **Burn rate + cost rate** — live tokens/min and $/min
-- **Model distribution** — Opus/Sonnet/Haiku percentage
-- **Session timer** — time to reset countdown
-- **Depletion predictions** — when tokens will run out
-- **CLI window switcher** — tap to bring terminal windows to front (Win32)
-- **Settings screen** — change plan (Custom/Pro/Max5/Max20) and view (Realtime/Daily/Monthly) from the touchscreen
-- **Three-screen UI** — swipe between Monitor, Windows, and Settings via tab bar
+## What it shows
 
-## Quick Start (Hardware)
+- **5H bar** — current 5-hour block utilization % with real-time countdown to reset
+- **7D bar** — 7-day rolling window utilization %
+- **Weather** — current conditions and temperature (wttr.in, refreshes every 3 min)
+- **Plan name** — Pro / Max5 / Max20
+- **Settings screen** — WiFi provisioning, timezone
 
-### Prerequisites
+Data comes directly from `claude.ai/api/organizations/{uuid}/usage` — the same numbers you see on the Claude.ai website.
 
-- ESP32-2432S028 CYD board ([$15 on AliExpress](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display))
+## Requirements
+
+- ESP32-2432S028 CYD board
 - USB-C cable
-- [PlatformIO](https://platformio.org/) (`pip install platformio`)
-- [claude-monitor](https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor) v3.1+ (`uv tool install claude-monitor`)
-- `pyserial` and `pywin32` (for the bridge script)
+- [PlatformIO](https://platformio.org/)
+- Python 3.10+ with `curl-cffi` and `pyserial`
+- A Claude.ai account (Pro or Max)
+
+## Setup
 
 ### 1. Flash the firmware
 
-```powershell
+```bash
 cd firmware
-pio run -e cyd --target upload --upload-port COM3
+# If build fails with ARM assembly errors:
+find .pio -name "*.S" -delete
+~/.platformio/penv/bin/pio run -e cyd --target upload --upload-port /dev/cu.usbserial-XXXX
 ```
 
-### 2. Run the bridge
+On first boot the CYD starts a WiFi AP named **CYD-Setup**. Connect to it, open `192.168.4.1`, enter your WiFi credentials.
 
-```powershell
-uv tool run --from claude-monitor --with pyserial --with pywin32 python scripts/bridge_combined.py --port COM3
-```
+### 2. Get your session key
 
-The CYD shows your live Claude Code usage. Tap the tab bar to switch between Monitor, Windows, and Settings.
+1. Open **claude.ai** in your browser (logged in)
+2. DevTools → **Application** → **Cookies** → `https://claude.ai`
+3. Copy the value of **`sessionKey`** (starts with `sk-ant-sid02-...`)
 
-## Quick Start (PC Simulator)
-
-No hardware needed — develop and preview on desktop.
-
-### Windows
-
-```powershell
-Set-ExecutionPolicy Bypass -Scope Process
-.\setup_windows.ps1
-python scripts\mock_data.py --demo        # Terminal 1
-.\lv_port_pc_vscode\bin\Release\main.exe  # Terminal 2
-```
-
-### macOS / Linux
+### 3. Run the bridge
 
 ```bash
-chmod +x setup.sh && ./setup.sh
-python3 scripts/mock_data.py --demo &
-./lv_port_pc_vscode/build/bin/main
+pip install curl-cffi pyserial
+python3 scripts/bridge_auto.py --session-key sk-ant-sid02-...
+```
+
+The bridge auto-detects the CYD — WiFi first (`claude-monitor.local`), USB serial fallback.
+
+### 4. Auto-start on login (macOS)
+
+Create `~/Library/LaunchAgents/com.claude.cyd-bridge.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.claude.cyd-bridge</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/python3</string>
+        <string>/path/to/scripts/bridge_auto.py</string>
+        <string>--session-key</string>
+        <string>sk-ant-sid02-YOUR-KEY-HERE</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/cyd-bridge.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/cyd-bridge.log</string>
+</dict>
+</plist>
+```
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.claude.cyd-bridge.plist
+tail -f /tmp/cyd-bridge.log
+```
+
+## Session key expiry
+
+The session key lasts weeks to months. When it expires the bridge logs:
+
+```
+[SESSION EXPIRED] Get new sessionKey from claude.ai → update plist → restart bridge
+```
+
+Get a new key from the browser, update the plist, then:
+```bash
+launchctl unload ~/Library/LaunchAgents/com.claude.cyd-bridge.plist
+launchctl load  ~/Library/LaunchAgents/com.claude.cyd-bridge.plist
+```
+
+## Architecture
+
+```
+Mac: bridge_auto.py
+  └─ curl_cffi → claude.ai/api/organizations/{uuid}/usage
+  └─ HTTP POST → claude-monitor.local/api/monitor (WiFi)
+               → /dev/cu.usbserial-* at 115200 (USB fallback)
+
+ESP32 CYD:
+  ├─ HTTP server (port 80) — receives JSON payload
+  ├─ LVGL UI — 5H bar, 7D bar, weather, plan name
+  └─ WiFi provisioning + timezone settings
 ```
 
 ## Project Structure
 
 ```
 claude-monitor-cyd/
-├── firmware/                     # ESP32 PlatformIO project
-│   ├── platformio.ini            # Board config + libraries
-│   ├── src/main.cpp              # Arduino entry point (display, touch, serial)
+├── firmware/
+│   ├── src/main.cpp              # ESP32: display, touch, WiFi, HTTP server, weather
 │   └── include/
-│       ├── lv_conf.h             # LVGL config (16-bit, 48KB heap, minimal)
-│       └── User_Setup.h          # TFT_eSPI CYD pin mappings
+│       ├── lv_conf.h             # LVGL 9.2 config
+│       └── User_Setup.h          # CYD pin mappings
 ├── src/
-│   ├── main.c                    # PC simulator entry point (SDL2)
-│   └── claude_monitor_ui.h       # Shared UI code (runs on both PC + ESP32)
+│   └── claude_monitor_ui.h       # LVGL UI (shared header)
 ├── scripts/
-│   ├── bridge_combined.py        # Main bridge: monitor + windows + settings
-│   ├── bridge_live.py            # Monitor-only bridge (simpler)
-│   ├── bridge_serial.py          # Basic serial bridge
-│   ├── bridge_claude_monitor.py  # Direct JSONL parser bridge
-│   └── mock_data.py              # Fake data generator (no deps)
-├── setup.sh                      # Linux/macOS simulator setup
-├── setup_windows.ps1             # Windows simulator setup
-├── TODO.md                       # Roadmap
-└── .claude/CLAUDE.md             # Project instructions for Claude Code
+│   ├── bridge_auto.py            # Bridge: Claude.ai API → CYD
+│   └── mock_data.py              # Fake data for simulator testing
+├── setup.sh / setup_windows.ps1  # PC simulator setup (SDL2)
+└── TODO.md
 ```
-
-## Architecture
-
-```
-PC (bridge_combined.py)                      CYD (ESP32)
-┌───────────────────────────┐               ┌──────────────────────┐
-│ claude-monitor v3.1       │               │ Screen 1: Monitor    │
-│   analyze_usage()         │──── JSON ────>│   cost, tokens, msgs │
-│   P90 limits              │   (serial)    │   burn rate, model   │
-│                           │               ├──────────────────────┤
-│ win32gui.EnumWindows()    │──── JSON ────>│ Screen 2: Windows    │
-│                           │               │   tap to switch      │
-│ SetForegroundWindow()     │<── switch ────│                      │
-│                           │               ├──────────────────────┤
-│ plan/view config handler  │<── config ────│ Screen 3: Settings   │
-│                           │               │   plan + view select │
-└───────────────────────────┘               └──────────────────────┘
-```
-
-## Serial Protocol
-
-| Direction | Message | Purpose |
-|-----------|---------|---------|
-| PC -> CYD | `{"type":"monitor","tokens_used":...}\n` | Dashboard metrics |
-| PC -> CYD | `{"type":"windows","list":[...]}\n` | CLI window list |
-| CYD -> PC | `{"switch":12345}\n` | Bring window to front |
-| CYD -> PC | `{"config":{"plan":"pro","view":"realtime"}}\n` | Change settings |
-
-## Bridge Scripts
-
-| Script | Use Case | Dependencies |
-|--------|----------|-------------|
-| `bridge_combined.py` | Full featured: monitor + windows + settings | claude-monitor, pyserial, pywin32 |
-| `bridge_live.py` | Monitor only (no window switching) | claude-monitor, pyserial |
-| `mock_data.py` | Testing without real Claude data | none |
 
 ## Hardware Notes
 
-- **Board**: ESP32-2432S028 (ILI9341 display, XPT2046 touch, CH340 USB)
-- **Display driver**: Raw HSPI SPI (TFT_eSPI incompatible with this board variant)
-- **Display fix**: X-mirror in flush callback, XY-mirror in touch callback
-- **Resolution**: 320x240 landscape (rotation 1)
-- **SPI speed**: 20MHz
-- **Power**: USB only (no battery)
+- **Board**: ESP32-2432S028 (ILI9341, XPT2046 touch, CH340 USB-serial)
+- **Display driver**: raw HSPI SPI — TFT_eSPI doesn't work with this board variant
+- **Orientation**: portrait 240×320, 180° rotation
+- **X-mirror fix**: pixels written in reverse column order in LVGL flush callback
+- **Touch fix**: `319 - x`, `239 - y` in touch callback
 
 ## Credits
 
-- [claude-monitor](https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor) — the data engine (P90 limits, session analysis, cost calculation)
 - [LVGL](https://lvgl.io/) — graphics library
-- [ESP32 CYD Community](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display) — hardware docs
+- [ESP32 CYD](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display) — hardware docs
+- [Usage4Claude](https://github.com/f-is-h/Usage4Claude) — inspiration for using the Claude.ai API directly
 
 ## License
 
