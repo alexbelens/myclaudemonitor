@@ -19,38 +19,36 @@ import json
 import sys
 import time
 import urllib.request
-import urllib.error
 import glob
 from datetime import datetime, timezone
+
+from curl_cffi import requests as cf_requests
 
 CLAUDE_AI    = "https://claude.ai/api"
 WIFI_HOST    = "claude-monitor.local"
 WIFI_TIMEOUT = 3
 SERIAL_BAUD  = 115200
-UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 
 
 # ── Claude.ai API ─────────────────────────────────────────────────────────────
 
 def api_get(path: str, session_key: str) -> object:
-    req = urllib.request.Request(
+    r = cf_requests.get(
         f"{CLAUDE_AI}{path}",
-        headers={
-            "Cookie":       f"sessionKey={session_key}",
-            "User-Agent":   UA,
-            "Accept":       "application/json",
-            "Referer":      "https://claude.ai/",
-        },
+        headers={"Accept": "application/json", "Referer": "https://claude.ai/"},
+        cookies={"sessionKey": session_key},
+        impersonate="chrome120",
+        timeout=10,
     )
-    with urllib.request.urlopen(req, timeout=10) as r:
-        return json.loads(r.read())
+    r.raise_for_status()
+    return r.json()
 
 
-def get_org_id(session_key: str) -> str:
+def get_org_uuid(session_key: str) -> str:
     orgs = api_get("/organizations", session_key)
     if not orgs:
         raise RuntimeError("No organizations returned by API")
-    return orgs[0]["id"]
+    return orgs[0]["uuid"]
 
 
 def parse_reset_min(resets_at: str) -> int:
@@ -65,14 +63,14 @@ def parse_reset_min(resets_at: str) -> int:
         return 300
 
 
-def build_payload(session_key: str, org_id: str, plan: str) -> dict:
-    usage = api_get(f"/organizations/{org_id}/usage", session_key)
+def build_payload(session_key: str, org_uuid: str, plan: str) -> dict:
+    usage = api_get(f"/organizations/{org_uuid}/usage", session_key)
 
-    fh = usage.get("five_hour", {})
-    sd = usage.get("seven_day", {})
+    fh = usage.get("five_hour", {}) or {}
+    sd = usage.get("seven_day", {}) or {}
 
-    fh_pct       = min(100, int(fh.get("utilization", 0.0) * 100))
-    sd_pct       = min(100, int(sd.get("utilization", 0.0) * 100))
+    fh_pct       = min(100, int(fh.get("utilization", 0.0)))
+    sd_pct       = min(100, int(sd.get("utilization", 0.0)))
     fh_reset_min = parse_reset_min(fh.get("resets_at", ""))
     sd_reset_min = parse_reset_min(sd.get("resets_at", ""))
 
@@ -125,7 +123,7 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float):
 
     mode             = None
     ser              = None
-    org_id           = None
+    org_uuid           = None
     wifi_check_every = 30
     last_wifi_check  = 0
 
@@ -138,8 +136,8 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float):
     # Fetch org ID once at startup
     print("Fetching org ID from claude.ai... ", end="", flush=True)
     try:
-        org_id = get_org_id(session_key)
-        print(f"OK ({org_id[:8]}...)")
+        org_uuid = get_org_uuid(session_key)
+        print(f"OK ({org_uuid[:8]}...)")
     except Exception as ex:
         print(f"FAILED: {ex}")
         print("Check your session key (--session-key).")
@@ -179,7 +177,7 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float):
 
         # Build payload
         try:
-            payload = build_payload(session_key, org_id, plan)
+            payload = build_payload(session_key, org_uuid, plan)
         except Exception as ex:
             print(f"\r[ERR]  build_payload: {ex}  ", end="", flush=True)
             time.sleep(interval)
