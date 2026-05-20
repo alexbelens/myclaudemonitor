@@ -10,7 +10,7 @@ A physical desktop dashboard for Claude.ai usage — built on an ESP32 "Cheap Ye
 
 - **5H bar** — current 5-hour block utilization % with real-time countdown to reset
 - **7D bar** — 7-day rolling window utilization %
-- **Weather** — current conditions and temperature (wttr.in, refreshes every 3 min)
+- **Weather** — current conditions and temperature (Open-Meteo ICON-EU model, refreshes every 3 min)
 - **Plan name** — Pro / Max5 / Max20
 
 ## Settings screen
@@ -186,6 +186,7 @@ claude-monitor-cyd/
 - [LVGL](https://lvgl.io/) — graphics library
 - [ESP32 CYD](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display) — hardware docs
 - [Usage4Claude](https://github.com/f-is-h/Usage4Claude) — inspiration for using the Claude.ai API directly
+- [Open-Meteo](https://open-meteo.com/) — weather data (ICON-EU model, free, no API key)
 
 ## License
 
