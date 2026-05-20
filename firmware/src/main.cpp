@@ -15,6 +15,7 @@
 #include <HTTPClient.h>
 #include <time.h>
 #include <ArduinoOTA.h>
+#include <WiFiClientSecure.h>
 #include "lvgl.h"
 
 /* ============================================================
@@ -189,37 +190,73 @@ static void update_clock_and_countdown(void) {
 }
 
 /* ============================================================
- * Weather — wttr.in plain text, no API key
+ * Weather — Open-Meteo (ICON-EU model, no API key)
+ * Kharkiv: 49.9935°N 36.2304°E
  * ============================================================ */
 
 static unsigned long last_weather_ms = 0;
 
+static const char* wmo_condition(int code) {
+    switch (code) {
+        case 0:  return "Clear sky";
+        case 1:  return "Mainly clear";
+        case 2:  return "Partly cloudy";
+        case 3:  return "Overcast";
+        case 45: case 48: return "Fog";
+        case 51: case 53: return "Drizzle";
+        case 55: return "Heavy drizzle";
+        case 56: case 57: return "Freezing rain";
+        case 61: return "Light rain";
+        case 63: return "Rain";
+        case 65: return "Heavy rain";
+        case 66: case 67: return "Freezing rain";
+        case 71: return "Light snow";
+        case 73: return "Snow";
+        case 75: return "Heavy snow";
+        case 77: return "Snow grains";
+        case 80: return "Light showers";
+        case 81: return "Showers";
+        case 82: return "Heavy showers";
+        case 85: return "Snow showers";
+        case 86: return "Heavy snow showers";
+        case 95: return "Thunderstorm";
+        case 96: case 99: return "Thunderstorm+hail";
+        default: return "Unknown";
+    }
+}
+
 static void fetch_weather(void) {
     if (!wifi_connected || WiFi.status() != WL_CONNECTED) return;
+    WiFiClientSecure client;
+    client.setInsecure();
     HTTPClient http;
-    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    http.begin("http://wttr.in/Kharkiv?format=%C+%t");
-    http.setTimeout(8000);
+    http.begin(client,
+        "https://api.open-meteo.com/v1/forecast"
+        "?latitude=49.9935&longitude=36.2304"
+        "&current=temperature_2m,weathercode"
+        "&timezone=Europe%2FKiev");
+    http.setTimeout(10000);
     int code = http.GET();
     if (code == 200) {
-        /* Read stream directly — avoids String heap allocation on repeated calls */
-        WiFiClient *stream = http.getStreamPtr();
-        char out[64] = {0};
-        int oi = 0;
-        unsigned long deadline = millis() + 3000;
-        while (oi < 63 && millis() < deadline) {
-            if (stream->available()) {
-                int c = stream->read();
-                if (c < 0) break;
-                if ((uint8_t)c >= 0x20) out[oi++] = (char)c;
+        String body = http.getString();
+        float temp = 0.0f;
+        int wcode = 0;
+        /* Skip "current_units" object — search for "current":{ */
+        const char *cur = strstr(body.c_str(), "\"current\":");
+        if (cur) {
+            cur = strchr(cur, '{');
+            if (cur) {
+                const char *v = jfind(cur, "temperature_2m");
+                if (v) temp = atof(v);
+                wcode = jint(cur, "weathercode", 0);
             }
         }
-        out[oi] = '\0';
-        Serial.printf("[Weather] HTTP %d oi=%d '%s'\n", code, oi, out);
-        if (oi > 0) {
-            strncpy(g_weather_str, out, sizeof(g_weather_str) - 1);
-            update_weather_display(g_weather_str);
-        }
+        int itemp = (int)(temp >= 0 ? temp + 0.5f : temp - 0.5f);
+        char out[64];
+        snprintf(out, sizeof(out), "%s %+d\xC2\xB0" "C", wmo_condition(wcode), itemp);
+        Serial.printf("[Weather] temp=%.1f code=%d -> '%s'\n", temp, wcode, out);
+        strncpy(g_weather_str, out, sizeof(g_weather_str) - 1);
+        update_weather_display(g_weather_str);
     } else {
         Serial.printf("[Weather] HTTP %d\n", code);
     }
