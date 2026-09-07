@@ -180,6 +180,9 @@ claude-monitor-cyd/
 - **X-mirror fix**: pixels written in reverse column order in LVGL flush callback
 - **Touch fix**: `319 - x`, `239 - y` in touch callback
 - **Backlight**: GPIO 21 — LOW = off (sleep), HIGH = on
+- **Partitions**: `min_spiffs.csv` — two 1.92 MB app slots. OTA writes the new
+  image into the second slot, so single-slot tables like `huge_app.csv` cannot
+  do OTA at all: the handshake succeeds and the transfer dies immediately.
 
 ## Credits
 

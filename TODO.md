@@ -9,10 +9,16 @@
 - Weather via wttr.in (3-min refresh)
 - Two-screen UI: Monitor + Settings
 - Claude.ai API bridge (5h + 7d utilization, accurate from Anthropic)
+- OAuth source: reads the Claude Code token from Keychain (self-refreshing,
+  no sessionKey to paste) and polls `/api/oauth/usage` — plain GET, no tokens spent
+- Per-model weekly cap on screen (Fable/Opus), hidden when the plan has none
+- Binding limit highlighted — the one that will actually stop you
 - WiFi transport (claude-monitor.local) + USB serial fallback
 - LaunchAgent auto-start on login
 - Session key expiry detection (`[SESSION EXPIRED]` in log)
 - ArduinoOTA — WiFi flash via `pio run -e cyd_ota --target upload`
+  (needs the two-slot `min_spiffs.csv` partition table — with `huge_app.csv`
+  there is no second app slot and OTA fails at the first byte)
 - Sleep/wake schedule — backlight off/on by hour, configurable in Settings screen, NVS persistence, touch-to-wake
 
 ## Pending

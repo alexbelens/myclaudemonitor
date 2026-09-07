@@ -63,7 +63,7 @@ static void lcd_init(void) {
     lcd_cmd(0x01); delay(150);
     lcd_cmd(0x11); delay(150);
     lcd_cmd(0x29); delay(50);
-    uint8_t mac[] = {0x08};  /* portrait, BGR */
+    uint8_t mac[] = {0x00};  /* portrait, RGB — 0x08 (BGR) swapped red and blue */
     lcd_cmd_data(0x36, mac, 1);
     uint8_t pf[] = {0x55};
     lcd_cmd_data(0x3A, pf, 1);
@@ -569,7 +569,7 @@ static void wifi_setup(void) {
     WiFi.begin(ssid.c_str(), pass.c_str());
 
     for (int i = 0; i < 20 && WiFi.status() != WL_CONNECTED; i++) {
-        delay(500);
+        for (int ms = 0; ms < 500; ms += 5) { delay(5); lv_timer_handler(); }
         Serial.print(".");
     }
 

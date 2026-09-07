@@ -30,10 +30,16 @@ typedef struct {
     int32_t sd_reset_min;    /* minutes until 7d block resets */
     int32_t warning_level;   /* 0=ok 1=50% 2=75% 3=90% */
     char    plan_name[16];
+    /* Per-model weekly cap (Fable, Opus, ...). Plans without one send an
+     * empty sc_name and the whole block stays hidden. */
+    int32_t sc_pct;          /* scoped-limit utilization 0-100 */
+    int32_t sc_reset_min;    /* minutes until it resets */
+    char    sc_name[16];     /* model name, e.g. "Fable" */
+    int32_t active_win;      /* which limit binds now: 5, 7, 3=scoped, 0=unknown */
 } claude_data_t;
 
 static claude_data_t g_data = {
-    0, 300, 0, 10080, 0, "Pro",
+    0, 300, 0, 10080, 0, "Pro", 0, 10080, "", 0,
 };
 
 /* ============================================================
@@ -87,6 +93,12 @@ static int  g_wake_hour_change  = 0;    /* -1 or +1 */
 #define CM_TAB_BG      lv_color_hex(0x0A0A20)
 #define CM_BTN_BG      lv_color_hex(0x0F0F28)
 #define CM_BTN_PRESS   lv_color_hex(0x1A1A40)
+/* Claude Code mascot — colors sampled from the real CLI banner.
+ * The panel now runs MADCTL=0x00 (RGB), so these are the true values;
+ * they were previously stored pre-swapped to work around a BGR panel. */
+#define CM_CLAUDE      lv_color_hex(0xD77757)  /* terracotta body */
+#define CM_CLAUDE_EYE  lv_color_hex(0x000000)  /* black eyes */
+#define CM_SWEAT       lv_color_hex(0x66CCFF)  /* light blue stress drop */
 
 /* ============================================================
  * SCREENS & WIDGETS
@@ -101,16 +113,21 @@ static lv_obj_t *lbl_date;
 static lv_obj_t *lbl_weather_temp;
 static lv_obj_t *lbl_weather_cond;
 static lv_obj_t *accent_bar;
-/* 5H zone */
-static lv_obj_t *lbl_fh_pct;
-static lv_obj_t *bar_fh;
-static lv_obj_t *lbl_fh_remain;
-/* 7D zone */
-static lv_obj_t *lbl_sd_pct;
-static lv_obj_t *bar_sd;
-static lv_obj_t *lbl_sd_remain;
-/* Plan name */
-static lv_obj_t *lbl_plan_name;
+/* Claude Code mascot (lives inside the ring) — built from obj rectangles */
+static lv_obj_t *mascot_cont;   /* transparent container (bobs up/down) */
+static lv_obj_t *mascot_head;
+static lv_obj_t *mascot_eye_l;
+static lv_obj_t *mascot_eye_r;
+static lv_obj_t *mascot_sweat;  /* stress drop, hidden until critical */
+static bool g_mascot_blink    = false;  /* true while eyes closed */
+static bool g_mascot_critical = false;  /* true when the hottest limit >= 90% */
+
+/* Three limits, equal weight, fixed order: 5H, 7D, per-model weekly */
+#define LIMIT_COUNT 3
+static lv_obj_t *lim_title[LIMIT_COUNT];
+static lv_obj_t *lim_pct[LIMIT_COUNT];
+static lv_obj_t *lim_bar[LIMIT_COUNT];
+static lv_obj_t *lim_reset[LIMIT_COUNT];
 
 /* Settings — WiFi */
 static lv_obj_t *lbl_wifi_state;
@@ -144,6 +161,49 @@ static lv_color_t warning_bar_color(int pct) {
     if (pct >= 75) return CM_ORANGE;
     if (pct >= 50) return CM_YELLOW;
     return CM_ACCENT;
+}
+
+/* ── Claude Code mascot — eye geometry (relative to container) ──
+ * Eyes keep a fixed vertical center; only their height changes:
+ * open (idle) / blink (closed line) / squint (tense, when 5H >= 90%). */
+/* Sprite is an 18x5 subpixel grid; each cell is SW x SH px on screen. */
+#define MASCOT_SW           5
+#define MASCOT_SH           9
+#define MASCOT_EYE_W        MASCOT_SW
+#define MASCOT_EYE_X_L      (5 * MASCOT_SW)    /* col 5  */
+#define MASCOT_EYE_X_R      (12 * MASCOT_SW)   /* col 12 */
+#define MASCOT_EYE_Y_OPEN   (1 * MASCOT_SH)    /* row 1  */
+#define MASCOT_EYE_H_OPEN   MASCOT_SH
+#define MASCOT_EYE_H_SQUINT 3
+#define MASCOT_EYE_H_BLINK  2
+#define MASCOT_Y            222   /* inside the hero ring */
+
+static void mascot_set_eyes(int h) {
+    int y = MASCOT_EYE_Y_OPEN + (MASCOT_EYE_H_OPEN - h) / 2;  /* keep center fixed */
+    lv_obj_set_height(mascot_eye_l, h); lv_obj_set_y(mascot_eye_l, y);
+    lv_obj_set_height(mascot_eye_r, h); lv_obj_set_y(mascot_eye_r, y);
+}
+
+/* Apply current state: critical (squint + sweat, no blink) vs idle (blink). */
+static void mascot_apply(void) {
+    if (!mascot_eye_l) return;
+    if (g_mascot_critical) {
+        mascot_set_eyes(MASCOT_EYE_H_SQUINT);
+        lv_obj_remove_flag(mascot_sweat, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        mascot_set_eyes(g_mascot_blink ? MASCOT_EYE_H_BLINK : MASCOT_EYE_H_OPEN);
+        lv_obj_add_flag(mascot_sweat, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void mascot_blink_cb(lv_timer_t *t) {
+    if (g_mascot_critical) {          /* tense: hold squint, don't blink */
+        lv_timer_set_period(t, 700);
+        return;
+    }
+    g_mascot_blink = !g_mascot_blink;
+    mascot_apply();
+    lv_timer_set_period(t, g_mascot_blink ? 140 : 3600);  /* short closed, long open */
 }
 
 static void fmt_time(int minutes, char *buf, size_t len) {
@@ -218,6 +278,10 @@ static void load_data_from_json(const char *buf) {
     g_data.sd_reset_min = jint(buf, "sd_reset_min",  g_data.sd_reset_min);
     g_data.warning_level = jint(buf, "warning_level", g_data.warning_level);
     jstr(buf, "plan_name", g_data.plan_name, sizeof(g_data.plan_name), g_data.plan_name);
+    g_data.sc_pct       = jint(buf, "sc_pct",       g_data.sc_pct);
+    g_data.sc_reset_min = jint(buf, "sc_reset_min",  g_data.sc_reset_min);
+    g_data.active_win   = jint(buf, "active_win",    g_data.active_win);
+    jstr(buf, "sc_name", g_data.sc_name, sizeof(g_data.sc_name), g_data.sc_name);
 }
 
 #ifndef ESP32
@@ -381,15 +445,15 @@ static void update_realtime_ui(const char *timebuf, const char *datebuf, int sec
     } else {
         int h = secs_left / 3600;
         int m = (secs_left % 3600) / 60;
-        int s = secs_left % 60;
-        if (h > 0) snprintf(remain, sizeof(remain), "%dh %02dm %02ds left", h, m, s);
-        else        snprintf(remain, sizeof(remain), "%dm %02ds left", m, s);
+        if (h > 0) snprintf(remain, sizeof(remain), "%dh %02dm left", h, m);
+        else        snprintf(remain, sizeof(remain), "%dm left", m);
         col = secs_left < 900  ? CM_RED    :
               secs_left < 1800 ? CM_ORANGE :
               secs_left < 3600 ? CM_YELLOW : CM_ACCENT;
     }
-    lv_label_set_text(lbl_fh_remain, remain);
-    lv_obj_set_style_text_color(lbl_fh_remain, col, 0);
+    /* 5H is always the first block, so the live countdown goes there */
+    lv_label_set_text(lim_reset[0], remain);
+    lv_obj_set_style_text_color(lim_reset[0], col, 0);
 }
 
 /* ============================================================
@@ -479,27 +543,60 @@ static void update_wifi_ui(void) {
  * UPDATE: MONITOR DATA (called when bridge sends payload)
  * ============================================================ */
 static void update_ui(void) {
-    char tmp[32];
+    char tmp[32], remain[20];
 
-    /* 5H bar */
-    snprintf(tmp, sizeof(tmp), "%d%%", g_data.fh_pct);
-    lv_label_set_text(lbl_fh_pct, tmp);
-    lv_bar_set_value(bar_fh, g_data.fh_pct, LV_ANIM_ON);
-    lv_obj_set_style_bg_color(bar_fh, warning_bar_color(g_data.fh_pct), LV_PART_INDICATOR);
+    bool has_scoped = (g_data.sc_name[0] != '\0');
 
-    /* 7D bar */
-    snprintf(tmp, sizeof(tmp), "%d%%", g_data.sd_pct);
-    lv_label_set_text(lbl_sd_pct, tmp);
-    lv_bar_set_value(bar_sd, g_data.sd_pct, LV_ANIM_ON);
-    lv_obj_set_style_bg_color(bar_sd, warning_bar_color(g_data.sd_pct), LV_PART_INDICATOR);
+    /* Fixed order — nothing jumps around between refreshes */
+    const char *nm[LIMIT_COUNT] = { "5H", "7D", g_data.sc_name };
+    int32_t     pc[LIMIT_COUNT] = { g_data.fh_pct, g_data.sd_pct, g_data.sc_pct };
+    int32_t     rs[LIMIT_COUNT] = { g_data.fh_reset_min, g_data.sd_reset_min, g_data.sc_reset_min };
 
-    char remain[20];
-    fmt_time_long(g_data.sd_reset_min, remain, sizeof(remain));
-    snprintf(tmp, sizeof(tmp), "%s left", remain);
-    lv_label_set_text(lbl_sd_remain, tmp);
+    for (int i = 0; i < LIMIT_COUNT; i++) {
+        /* The third block only exists on plans with a per-model weekly cap */
+        bool shown = (i < 2) || has_scoped;
+        lv_obj_t *parts[] = { lim_title[i], lim_pct[i], lim_bar[i], lim_reset[i] };
+        for (unsigned k = 0; k < sizeof(parts) / sizeof(parts[0]); k++) {
+            if (shown) lv_obj_remove_flag(parts[k], LV_OBJ_FLAG_HIDDEN);
+            else       lv_obj_add_flag(parts[k],    LV_OBJ_FLAG_HIDDEN);
+        }
+        if (!shown) continue;
 
-    /* Plan name */
-    lv_label_set_text(lbl_plan_name, g_data.plan_name);
+        lv_label_set_text(lim_title[i], nm[i]);
+        snprintf(tmp, sizeof(tmp), "%d%%", (int)pc[i]);
+        lv_label_set_text(lim_pct[i], tmp);
+        lv_bar_set_value(lim_bar[i], pc[i], LV_ANIM_ON);
+        lv_obj_set_style_bg_color(lim_bar[i], warning_bar_color(pc[i]), LV_PART_INDICATOR);
+
+        /* The 5H line is overwritten every second by the live countdown */
+        fmt_time_long(rs[i], remain, sizeof(remain));
+        snprintf(tmp, sizeof(tmp), "%s left", remain);
+        lv_label_set_text(lim_reset[i], tmp);
+    }
+
+    /* Mascot reacts to the hottest limit, whichever that is */
+    int32_t worst = pc[0];
+    for (int i = 1; i < LIMIT_COUNT; i++) {
+        if ((i < 2 || has_scoped) && pc[i] > worst) worst = pc[i];
+    }
+    g_mascot_critical = (worst >= 90);
+    mascot_apply();
+}
+
+/* Solid filled rounded block — used to build the mascot from primitives */
+static lv_obj_t* make_block(lv_obj_t *parent, lv_color_t color,
+                            int x, int y, int w, int h, int radius) {
+    lv_obj_t *o = lv_obj_create(parent);
+    lv_obj_set_size(o, w, h);
+    lv_obj_set_pos(o, x, y);
+    lv_obj_set_style_bg_color(o, color, 0);
+    lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(o, 0, 0);
+    lv_obj_set_style_radius(o, radius, 0);
+    lv_obj_set_style_pad_all(o, 0, 0);
+    lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(o, LV_SCROLLBAR_MODE_OFF);
+    return o;
 }
 
 /* ============================================================
@@ -507,11 +604,13 @@ static void update_ui(void) {
  *
  *  y=  0.. 70  Header: clock / date  |  temp / cond
  *  y= 70.. 73  Alert stripe (air-raid, pending API token)
- *  y= 80..138  5H zone: label+% / bar / remain (ticking)
- *  y=143       Divider
- *  y=150..208  7D zone: label+% / bar / remain
- *  y=213       Divider
- *  y=230..268  Plan name (large, centered)
+ *  y= 74..118  5H zone: label+% / bar / remain (ticking)
+ *  y=124       Divider
+ *  y=125..169  7D zone: label+% / bar / remain
+ *  y=175       Divider
+ *  y=176..204  Per-model weekly cap (Fable/Opus); hidden if the plan has none
+ *  y=226..271  Claude Code mascot (18x5 sprite: body + arms + eyes + legs)
+ *  A soft panel slides behind whichever of the three is currently binding.
  *  y=272       Divider
  *  y=296       Tab bar
  * ============================================================ */
@@ -568,62 +667,73 @@ static void build_monitor_screen(lv_obj_t *scr) {
     lv_obj_set_style_radius(accent_bar, 0, 0);
     lv_obj_set_scrollbar_mode(accent_bar, LV_SCROLLBAR_MODE_OFF);
 
-    /* ── 5H zone (y=80..138) ── */
-    make_label(scr, "5H", &lv_font_montserrat_10, CM_TEXT_SEC, 8, 82);
+    /* ── Three limit blocks (y=76 / 134 / 192), same size, fixed order.
+     *    Each: name on the left, big number on the right, full-width bar,
+     *    and the time until it resets. ── */
+    for (int i = 0; i < LIMIT_COUNT; i++) {
+        int y = 76 + i * 50;
 
-    lbl_fh_pct = lv_label_create(scr);
-    lv_label_set_text(lbl_fh_pct, "0%");
-    lv_obj_set_style_text_font(lbl_fh_pct, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(lbl_fh_pct, CM_TEXT_PRIM, 0);
-    lv_obj_set_pos(lbl_fh_pct, 195, 82);
-    lv_obj_set_width(lbl_fh_pct, 37);
-    lv_obj_set_style_text_align(lbl_fh_pct, LV_TEXT_ALIGN_RIGHT, 0);
+        lim_title[i] = make_label(scr, "--", &lv_font_montserrat_14, CM_TEXT_SEC, 8, y);
 
-    bar_fh = make_bar(scr, CM_ACCENT, 6, 97, 228, 14);
+        lim_pct[i] = lv_label_create(scr);
+        lv_label_set_text(lim_pct[i], "0%");
+        lv_obj_set_style_text_font(lim_pct[i], &lv_font_montserrat_22, 0);
+        lv_obj_set_style_text_color(lim_pct[i], CM_TEXT_PRIM, 0);
+        lv_obj_set_pos(lim_pct[i], 110, y - 3);
+        lv_obj_set_width(lim_pct[i], 122);
+        lv_obj_set_style_text_align(lim_pct[i], LV_TEXT_ALIGN_RIGHT, 0);
 
-    lbl_fh_remain = lv_label_create(scr);
-    lv_label_set_text(lbl_fh_remain, "-- left");
-    lv_obj_set_style_text_font(lbl_fh_remain, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(lbl_fh_remain, CM_ACCENT, 0);
-    lv_obj_set_width(lbl_fh_remain, 240);
-    lv_obj_set_style_text_align(lbl_fh_remain, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(lbl_fh_remain, 0, 118);
+        lim_bar[i] = make_bar(scr, CM_ACCENT, 8, y + 24, 224, 14);
 
-    /* ── Divider ── */
-    make_divider(scr, 143, CM_DIVIDER);
+        lim_reset[i] = lv_label_create(scr);
+        lv_label_set_text(lim_reset[i], "");
+        lv_obj_set_style_text_font(lim_reset[i], &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(lim_reset[i], CM_TEXT_DIM, 0);
+        lv_obj_set_pos(lim_reset[i], 62, y + 1);
+        lv_obj_set_width(lim_reset[i], 120);
+        lv_obj_set_style_text_align(lim_reset[i], LV_TEXT_ALIGN_LEFT, 0);
+    }
 
-    /* ── 7D zone (y=150..208) ── */
-    make_label(scr, "7D", &lv_font_montserrat_10, CM_TEXT_SEC, 8, 152);
+    /* ── Claude Code mascot (centered, container bobs gently) ──
+     * Reproduces the real CLI banner sprite (18x5 subpixel grid):
+     *      ############        head (rounded)
+     *      ##.######.##        two small eyes near the edges
+     *    ################      middle row is wider (little arms)
+     *      ############        lower body
+     *       # #    # #         four legs in two pairs
+     * Body/arms/legs are terracotta blocks; eyes are black blocks on top. */
+    mascot_cont = lv_obj_create(scr);
+    lv_obj_set_size(mascot_cont, 18 * MASCOT_SW, 5 * MASCOT_SH);  /* 72x30 */
+    lv_obj_set_pos(mascot_cont, (240 - 18 * MASCOT_SW) / 2, MASCOT_Y);
+    lv_obj_set_style_bg_opa(mascot_cont, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(mascot_cont, 0, 0);
+    lv_obj_set_style_radius(mascot_cont, 0, 0);
+    lv_obj_set_style_pad_all(mascot_cont, 0, 0);
+    lv_obj_remove_flag(mascot_cont, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(mascot_cont, LV_SCROLLBAR_MODE_OFF);
 
-    lbl_sd_pct = lv_label_create(scr);
-    lv_label_set_text(lbl_sd_pct, "0%");
-    lv_obj_set_style_text_font(lbl_sd_pct, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(lbl_sd_pct, CM_TEXT_PRIM, 0);
-    lv_obj_set_pos(lbl_sd_pct, 195, 152);
-    lv_obj_set_width(lbl_sd_pct, 37);
-    lv_obj_set_style_text_align(lbl_sd_pct, LV_TEXT_ALIGN_RIGHT, 0);
-
-    bar_sd = make_bar(scr, CM_GREEN, 6, 167, 228, 14);
-
-    lbl_sd_remain = lv_label_create(scr);
-    lv_label_set_text(lbl_sd_remain, "-- left");
-    lv_obj_set_style_text_font(lbl_sd_remain, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(lbl_sd_remain, CM_TEXT_SEC, 0);
-    lv_obj_set_width(lbl_sd_remain, 240);
-    lv_obj_set_style_text_align(lbl_sd_remain, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(lbl_sd_remain, 0, 188);
-
-    /* ── Divider ── */
-    make_divider(scr, 213, CM_DIVIDER);
-
-    /* ── Plan name (y=230, montserrat_28, centered) ── */
-    lbl_plan_name = lv_label_create(scr);
-    lv_label_set_text(lbl_plan_name, "Pro");
-    lv_obj_set_style_text_font(lbl_plan_name, &lv_font_montserrat_28, 0);
-    lv_obj_set_style_text_color(lbl_plan_name, CM_ACCENT, 0);
-    lv_obj_set_width(lbl_plan_name, 240);
-    lv_obj_set_style_text_align(lbl_plan_name, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(lbl_plan_name, 0, 232);
+    /* body: rows 0..3, cols 3..14 (rounded head) */
+    make_block(mascot_cont, CM_CLAUDE, 3 * MASCOT_SW, 0,
+               12 * MASCOT_SW, 4 * MASCOT_SH, 6);
+    /* arms: row 2 sticks out two cols on each side */
+    make_block(mascot_cont, CM_CLAUDE, 1 * MASCOT_SW, 2 * MASCOT_SH,
+               2 * MASCOT_SW, MASCOT_SH, 2);
+    make_block(mascot_cont, CM_CLAUDE, 15 * MASCOT_SW, 2 * MASCOT_SH,
+               2 * MASCOT_SW, MASCOT_SH, 2);
+    /* legs: row 4, cols 4 & 6 (left pair), 11 & 13 (right pair) */
+    make_block(mascot_cont, CM_CLAUDE,  4 * MASCOT_SW, 4 * MASCOT_SH, MASCOT_SW, MASCOT_SH, 2);
+    make_block(mascot_cont, CM_CLAUDE,  6 * MASCOT_SW, 4 * MASCOT_SH, MASCOT_SW, MASCOT_SH, 2);
+    make_block(mascot_cont, CM_CLAUDE, 11 * MASCOT_SW, 4 * MASCOT_SH, MASCOT_SW, MASCOT_SH, 2);
+    make_block(mascot_cont, CM_CLAUDE, 13 * MASCOT_SW, 4 * MASCOT_SH, MASCOT_SW, MASCOT_SH, 2);
+    /* eyes (black blocks on top of the body, row 1) */
+    mascot_eye_l = make_block(mascot_cont, CM_CLAUDE_EYE,
+        MASCOT_EYE_X_L, MASCOT_EYE_Y_OPEN, MASCOT_EYE_W, MASCOT_EYE_H_OPEN, 1);
+    mascot_eye_r = make_block(mascot_cont, CM_CLAUDE_EYE,
+        MASCOT_EYE_X_R, MASCOT_EYE_Y_OPEN, MASCOT_EYE_W, MASCOT_EYE_H_OPEN, 1);
+    /* stress drop (top-right), shown only when 5H >= 90% */
+    mascot_sweat = make_block(mascot_cont, CM_SWEAT, 15 * MASCOT_SW, MASCOT_SH / 2,
+               MASCOT_SW, MASCOT_SH, 2);
+    lv_obj_add_flag(mascot_sweat, LV_OBJ_FLAG_HIDDEN);
 
     make_divider(scr, 272, CM_DIVIDER);
 
@@ -821,6 +931,21 @@ static void claude_monitor_create_ui(void) {
     update_dev_num_ui();
     update_tz_display();
     update_sleep_ui();
+
+    /* Mascot: blink loop + gentle idle bob (2px up/down) */
+    mascot_apply();
+    lv_timer_create(mascot_blink_cb, 3600, NULL);
+
+    lv_anim_t bob;
+    lv_anim_init(&bob);
+    lv_anim_set_var(&bob, mascot_cont);
+    lv_anim_set_exec_cb(&bob, (lv_anim_exec_xcb_t)lv_obj_set_y);
+    lv_anim_set_values(&bob, MASCOT_Y, MASCOT_Y - 3);
+    lv_anim_set_duration(&bob, 1400);
+    lv_anim_set_playback_duration(&bob, 1400);
+    lv_anim_set_repeat_count(&bob, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_path_cb(&bob, lv_anim_path_ease_in_out);
+    lv_anim_start(&bob);
 
 #ifndef ESP32
     lv_timer_create(data_poll_cb, 2000, NULL);
