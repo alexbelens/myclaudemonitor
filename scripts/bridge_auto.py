@@ -321,9 +321,12 @@ _host_addr       = {}   # mDNS name -> resolved IP
 
 
 def host_addr(host: str) -> str:
+    # getaddrinfo, not gethostbyname: only the former resolves mDNS ".local"
+    # names through mDNSResponder on macOS.
     if host not in _host_addr:
         try:
-            _host_addr[host] = socket.gethostbyname(host)
+            info = socket.getaddrinfo(host, 80, socket.AF_INET, socket.SOCK_STREAM)
+            _host_addr[host] = info[0][4][0]
         except OSError:
             return host          # let urllib try the name itself
     return _host_addr[host]
@@ -343,6 +346,10 @@ def wifi_available(host: str) -> bool:
             return r.status == 200
     except Exception as ex:
         _last_wifi_error = f"{type(ex).__name__}: {ex}"
+        # This probe is the only path back into "wifi" mode, so it has to drop
+        # the cached address itself. Otherwise a device that came back on a new
+        # IP is probed at the old one forever and the bridge never recovers.
+        forget_host(host)
         return False
 
 
