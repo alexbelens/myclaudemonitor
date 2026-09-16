@@ -53,6 +53,17 @@ static int  g_tz_change       = 0;
 static char g_weather_temp[16] = "--";
 static char g_weather_cond[32] = "--";
 
+/* Air raid alert — alerts.in.ua, polled by main.cpp.
+ * UNKNOWN covers both "never polled yet" and "last poll is too old": a
+ * display that cannot reach the API must never read as "all clear". */
+typedef enum {
+    ALERT_UNKNOWN = 0,
+    ALERT_CLEAR,
+    ALERT_PARTIAL,
+    ALERT_ACTIVE,
+} alert_state_t;
+static alert_state_t g_alert_state = ALERT_UNKNOWN;
+
 /* WiFi provisioning */
 typedef enum { WIFI_STATE_DISCONNECTED, WIFI_STATE_CONNECTED, WIFI_STATE_AP_ACTIVE } wifi_ui_state_t;
 static wifi_ui_state_t g_wifi_ui_state = WIFI_STATE_DISCONNECTED;
@@ -112,6 +123,7 @@ static lv_obj_t *lbl_clock;
 static lv_obj_t *lbl_date;
 static lv_obj_t *lbl_weather_temp;
 static lv_obj_t *lbl_weather_cond;
+static lv_obj_t *lbl_alert;
 static lv_obj_t *accent_bar;
 /* Claude Code mascot (lives inside the ring) — built from obj rectangles */
 static lv_obj_t *mascot_cont;   /* transparent container (bobs up/down) */
@@ -469,6 +481,48 @@ static void update_weather_display(const char *raw) {
 }
 
 /* ============================================================
+ * UPDATE: AIR RAID ALERT (called after fetch from main.cpp)
+ * ============================================================ */
+static void update_alert_display(alert_state_t st) {
+    g_alert_state = st;
+
+    switch (st) {
+    case ALERT_ACTIVE:
+        lv_label_set_text(lbl_alert, LV_SYMBOL_WARNING);
+        lv_obj_set_style_text_color(lbl_alert, CM_RED, 0);
+        lv_obj_remove_flag(lbl_alert, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_bg_color(accent_bar, CM_RED, 0);
+        break;
+
+    case ALERT_PARTIAL:
+        /* Alert in part of the region only — same glyph, softer colour. */
+        lv_label_set_text(lbl_alert, LV_SYMBOL_WARNING);
+        lv_obj_set_style_text_color(lbl_alert, CM_ORANGE, 0);
+        lv_obj_remove_flag(lbl_alert, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_bg_color(accent_bar, CM_ORANGE, 0);
+        break;
+
+    case ALERT_UNKNOWN:
+        /* No fresh answer from the API. Show a dim "stale" glyph rather than
+         * nothing, so an unreachable API can never be mistaken for silence. */
+        lv_label_set_text(lbl_alert, LV_SYMBOL_REFRESH);
+        lv_obj_set_style_text_color(lbl_alert, CM_TEXT_DIM, 0);
+        lv_obj_remove_flag(lbl_alert, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_bg_color(accent_bar, CM_DIVIDER, 0);
+        break;
+
+    case ALERT_CLEAR:
+    default:
+        lv_obj_add_flag(lbl_alert, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_bg_color(accent_bar, CM_DIVIDER, 0);
+        break;
+    }
+
+    lv_obj_invalidate(lbl_alert);
+    lv_obj_invalidate(accent_bar);
+}
+
+/* ============================================================
  * UPDATE: TIMEZONE DISPLAY
  * ============================================================ */
 static void update_tz_display(void) {
@@ -656,6 +710,16 @@ static void build_monitor_screen(lv_obj_t *scr) {
     lv_obj_set_pos(lbl_weather_cond, 118, 44);
     lv_obj_set_width(lbl_weather_cond, 114);
     lv_obj_set_style_text_align(lbl_weather_cond, LV_TEXT_ALIGN_RIGHT, 0);
+
+    /* ── Air raid icon — lives in the dead gap between the clock (%H:%M ends
+     *    near x=80) and the weather block (starts at x=118). Hidden only when
+     *    the API has confirmed there is no alert. ── */
+    lbl_alert = lv_label_create(hdr);
+    lv_label_set_text(lbl_alert, LV_SYMBOL_WARNING);
+    lv_obj_set_style_text_font(lbl_alert, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(lbl_alert, CM_RED, 0);
+    lv_obj_set_pos(lbl_alert, 84, 6);
+    lv_obj_add_flag(lbl_alert, LV_OBJ_FLAG_HIDDEN);
 
     /* ── Alert stripe (y=70..73) — green=safe, red=alert ── */
     accent_bar = lv_obj_create(scr);

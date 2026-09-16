@@ -70,10 +70,38 @@ Bridge sends JSON payload every 30s:
 - Baud: 115200 (USB serial fallback)
 - PC→CYD: `{...}\n` JSON payload
 - WiFi: HTTP POST to `http://claude-monitor.local/api/monitor`
+- Device endpoints: `GET /api/status`, `POST /api/monitor`, `POST /api/config`
+
+### Air Raid Alerts (alerts.in.ua)
+- Fetched **by the device itself**, like the weather — not via the bridge, so the
+  indicator survives the Mac sleeping or the bridge dying.
+- Endpoint: `GET /v1/iot/active_air_raid_alerts/{uid}.json` → one char `A`/`P`/`N`
+- Polled every 30s (rate limit is 8-10 req/min); no answer for 3 min → `UNKNOWN`
+- **UID 124 = Харківський район**, matching the weather coordinates. Do NOT use the
+  oblast UID (22): alerts there are announced per raion, so the oblast reads
+  "partial" nearly around the clock and the indicator stops meaning anything.
+- Token + UID live in NVS (namespace `cyd`, keys `al_token` / `al_uid`), never in git:
+  ```bash
+  T=$(cat ~/.alerts_token)
+  curl -X POST http://claude-monitor.local/api/config \
+       -H 'Content-Type: application/json' \
+       -d "{\"alert_token\":\"$T\",\"alert_uid\":124}"
+  ```
+  `/api/status` reports `has_token` but never echoes the token back.
 
 ### Two Screens
-1. **Monitor**: clock/date, weather (wttr.in), 5H bar + countdown, 7D bar, plan name
+1. **Monitor**: clock/date, weather (Open-Meteo), air raid icon + stripe,
+   5H bar + countdown, 7D bar, plan name
 2. **Settings**: WiFi provisioning (AP mode), timezone ±
+
+Alert states drive both the header icon (in the gap between clock and weather)
+and the `accent_bar` stripe under the header:
+| State | Icon | Stripe |
+|---|---|---|
+| `ALERT_ACTIVE` | red ⚠ | red |
+| `ALERT_PARTIAL` | orange ⚠ | orange |
+| `ALERT_CLEAR` | hidden | dim |
+| `ALERT_UNKNOWN` | dim ↻ | dim |
 
 ### Session Key
 - Stored in `~/Library/LaunchAgents/com.claude.cyd-bridge.plist` (outside git, never committed)

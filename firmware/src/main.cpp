@@ -264,6 +264,113 @@ static void fetch_weather(void) {
 }
 
 /* ============================================================
+ * Air raid alerts — alerts.in.ua
+ *
+ * Fetched by the device itself, like the weather, so the indicator keeps
+ * working when the Mac is asleep or the bridge is down.
+ *
+ * Token and region UID live in NVS, never in git. Set them with:
+ *   POST /api/config {"alert_token":"...","alert_uid":124}
+ *
+ * Default UID 124 = Харківський район, matching the weather coordinates.
+ * The oblast-level UID (22) is deliberately NOT the default: alerts there
+ * are announced per raion, so the oblast reports "partial" almost around
+ * the clock and the indicator would never say anything useful.
+ * ============================================================ */
+
+#define ALERT_POLL_MS   (30UL * 1000UL)        /* 2 req/min — soft limit is 8-10 */
+#define ALERT_STALE_MS  (3UL * 60UL * 1000UL)  /* older than this -> UNKNOWN */
+
+static char          g_alert_token[96] = {0};
+static int           g_alert_uid       = 124;
+static unsigned long last_alert_ms     = 0;
+static unsigned long last_alert_ok_ms  = 0;
+static bool          alert_ok_seen     = false;
+
+static const char* alert_state_name(alert_state_t st) {
+    switch (st) {
+        case ALERT_ACTIVE:  return "active";
+        case ALERT_PARTIAL: return "partial";
+        case ALERT_CLEAR:   return "clear";
+        default:            return "unknown";
+    }
+}
+
+static void load_alert_from_nvs(void) {
+    Preferences prefs;
+    prefs.begin("cyd", true);
+    g_alert_uid = prefs.getInt("al_uid", 124);
+    String t = prefs.getString("al_token", "");
+    strncpy(g_alert_token, t.c_str(), sizeof(g_alert_token) - 1);
+    prefs.end();
+    Serial.printf("[Alert] uid=%d token=%s\n",
+                  g_alert_uid, g_alert_token[0] ? "set" : "MISSING");
+}
+
+static void fetch_alert(void) {
+    if (!wifi_connected || WiFi.status() != WL_CONNECTED) return;
+    if (g_alert_token[0] == '\0') return;   /* unconfigured — stays UNKNOWN */
+
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient http;
+
+    char url[112];
+    snprintf(url, sizeof(url),
+             "https://api.alerts.in.ua/v1/iot/active_air_raid_alerts/%d.json",
+             g_alert_uid);
+    http.begin(client, url);
+
+    char auth[128];
+    snprintf(auth, sizeof(auth), "Bearer %s", g_alert_token);
+    http.addHeader("Authorization", auth);
+    http.setTimeout(10000);
+
+    int code = http.GET();
+    if (code == 200) {
+        /* The IoT endpoint answers with one quoted character: "A", "P" or "N" */
+        String body = http.getString();
+        body.trim();
+        if (body.length() >= 2 && body[0] == '"' && body[body.length() - 1] == '"')
+            body = body.substring(1, body.length() - 1);
+
+        alert_state_t st = ALERT_UNKNOWN;
+        if (body.length() == 1) {
+            switch (body[0]) {
+                case 'A': st = ALERT_ACTIVE;  break;
+                case 'P': st = ALERT_PARTIAL; break;
+                case 'N': st = ALERT_CLEAR;   break;
+                default:  break;
+            }
+        }
+
+        if (st != ALERT_UNKNOWN) {
+            last_alert_ok_ms = millis();
+            alert_ok_seen    = true;
+            Serial.printf("[Alert] uid=%d -> %s\n", g_alert_uid, alert_state_name(st));
+            update_alert_display(st);
+        } else {
+            Serial.printf("[Alert] unexpected body '%s'\n", body.c_str());
+        }
+    } else {
+        /* 401 bad token, 429 rate limited, negative = transport. Keep the last
+         * known state; the staleness check below demotes it soon enough. */
+        Serial.printf("[Alert] HTTP %d\n", code);
+    }
+    http.end();
+}
+
+/* Demote to UNKNOWN when the last good answer is too old, so a dead WiFi
+ * link or an expired token cannot keep showing a reassuring blank header. */
+static void alert_check_stale(void) {
+    if (g_alert_state == ALERT_UNKNOWN) return;
+    if (!alert_ok_seen || millis() - last_alert_ok_ms >= ALERT_STALE_MS) {
+        Serial.println("[Alert] stale — no fresh answer, showing UNKNOWN");
+        update_alert_display(ALERT_UNKNOWN);
+    }
+}
+
+/* ============================================================
  * Timezone — NVS persistence
  * ============================================================ */
 
@@ -383,11 +490,54 @@ static void http_handle_monitor(void) {
 }
 
 static void http_handle_status(void) {
+    char resp[224];
+    snprintf(resp, sizeof(resp),
+        "{\"ok\":true,\"version\":\"4.0\",\"ip\":\"%s\","
+        "\"alert\":\"%s\",\"alert_uid\":%d,\"has_token\":%s}",
+        WiFi.localIP().toString().c_str(),
+        alert_state_name(g_alert_state),
+        g_alert_uid,
+        g_alert_token[0] ? "true" : "false");
+    http_server.send(200, "application/json", resp);
+}
+
+/* Set the alerts.in.ua token and region UID without reflashing. The token is
+ * stored in NVS and is never echoed back — the reply only confirms presence. */
+static void http_handle_config(void) {
+    String body = http_server.hasArg("plain") ? http_server.arg("plain") : "";
+    if (body.length() == 0) {
+        http_server.send(400, "application/json", "{\"error\":\"no body\"}");
+        return;
+    }
+
+    Preferences prefs;
+    prefs.begin("cyd", false);
+
+    char tok[96] = {0};
+    jstr(body.c_str(), "alert_token", tok, sizeof(tok), "");
+    if (tok[0]) {
+        strncpy(g_alert_token, tok, sizeof(g_alert_token) - 1);
+        g_alert_token[sizeof(g_alert_token) - 1] = '\0';
+        prefs.putString("al_token", tok);
+    }
+
+    int uid = jint(body.c_str(), "alert_uid", 0);
+    if (uid > 0) {
+        g_alert_uid = uid;
+        prefs.putInt("al_uid", uid);
+    }
+    prefs.end();
+
+    Serial.printf("[Alert] config: uid=%d token=%s\n",
+                  g_alert_uid, g_alert_token[0] ? "set" : "MISSING");
+
     char resp[128];
     snprintf(resp, sizeof(resp),
-        "{\"ok\":true,\"version\":\"4.0\",\"ip\":\"%s\"}",
-        WiFi.localIP().toString().c_str());
+        "{\"ok\":true,\"alert_uid\":%d,\"has_token\":%s}",
+        g_alert_uid, g_alert_token[0] ? "true" : "false");
     http_server.send(200, "application/json", resp);
+
+    last_alert_ms = 0;   /* re-poll on the next loop pass with the new settings */
 }
 
 static void http_handle_not_found(void) {
@@ -603,6 +753,7 @@ static void wifi_setup(void) {
 
     http_server.on("/api/monitor", HTTP_POST, http_handle_monitor);
     http_server.on("/api/status",  HTTP_GET,  http_handle_status);
+    http_server.on("/api/config",  HTTP_POST, http_handle_config);
     http_server.onNotFound(http_handle_not_found);
     http_server.begin();
     Serial.println("[HTTP] Server on port 80");
@@ -621,6 +772,12 @@ static void wifi_setup(void) {
     delay(1000);
     fetch_weather();
     last_weather_ms = millis();
+
+    /* Air raid alerts — show UNKNOWN until the first answer lands */
+    load_alert_from_nvs();
+    update_alert_display(ALERT_UNKNOWN);
+    fetch_alert();
+    last_alert_ms = millis();
 }
 
 static void handle_wifi_config(const char *buf) {
@@ -717,6 +874,15 @@ void loop() {
     if (wifi_connected && (now_ms - last_weather_ms >= 3UL * 60UL * 1000UL)) {
         last_weather_ms = now_ms;
         fetch_weather();
+    }
+
+    /* Air raid poll every 30s. Deliberately not gated on wifi_connected:
+     * fetch_alert() no-ops while offline, but the staleness check still has
+     * to run so a dropped link stops showing a stale "all clear". */
+    if (now_ms - last_alert_ms >= ALERT_POLL_MS) {
+        last_alert_ms = now_ms;
+        fetch_alert();
+        alert_check_stale();
     }
 
     /* Timezone change from [−]/[+] buttons in Settings */
