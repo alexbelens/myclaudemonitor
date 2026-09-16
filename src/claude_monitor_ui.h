@@ -711,14 +711,33 @@ static void build_monitor_screen(lv_obj_t *scr) {
     lv_obj_set_width(lbl_weather_cond, 114);
     lv_obj_set_style_text_align(lbl_weather_cond, LV_TEXT_ALIGN_RIGHT, 0);
 
-    /* ── Air raid icon — lives in the dead gap between the clock (%H:%M ends
-     *    near x=80) and the weather block (starts at x=118). Hidden only when
-     *    the API has confirmed there is no alert. ── */
+    /* ── Air raid icon — lives in the dead gap between the clock and the
+     *    weather block. "%H:%M" in Montserrat 28 measures 71.8px, so the clock
+     *    ends at x=80 and the weather starts at x=118: a 38px slot.
+     *
+     *    ...but that slot is not where the eye looks. The temperature is
+     *    RIGHT-aligned inside a 114px box at x=118, so "+15°C" (74.8px) only
+     *    starts painting at x=157. The visible emptiness is therefore x=80..157
+     *    and its centre is 118 — which is also the centre of the 240px header.
+     *    Centring on the formal 80..118 slot instead put the glyph at 99 and
+     *    made it look glued to the clock.
+     *
+     *    So: a 38px box centred on the header's midpoint, and the label keeps
+     *    that full width with centred text because the glyphs differ in width
+     *    (warning 31.5px, refresh 28.0px) — a fixed x would centre one and
+     *    offset the other.
+     *
+     *    y matches the clock exactly — same font, same baseline. The warning
+     *    glyph carries ofs_y=-4 and is 29px tall against the digits' 20px, so
+     *    it already sits lower on its own; nudging y as well is what made it
+     *    look dropped. Hidden only when the API confirms there is no alert. ── */
     lbl_alert = lv_label_create(hdr);
     lv_label_set_text(lbl_alert, LV_SYMBOL_WARNING);
     lv_obj_set_style_text_font(lbl_alert, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(lbl_alert, CM_RED, 0);
-    lv_obj_set_pos(lbl_alert, 84, 6);
+    lv_obj_set_pos(lbl_alert, 101, 4);   /* 101 + 38/2 = 120 = header centre */
+    lv_obj_set_width(lbl_alert, 38);
+    lv_obj_set_style_text_align(lbl_alert, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_add_flag(lbl_alert, LV_OBJ_FLAG_HIDDEN);
 
     /* ── Alert stripe (y=70..73) — green=safe, red=alert ── */

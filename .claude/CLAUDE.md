@@ -77,9 +77,12 @@ Bridge sends JSON payload every 30s:
   indicator survives the Mac sleeping or the bridge dying.
 - Endpoint: `GET /v1/iot/active_air_raid_alerts/{uid}.json` → one char `A`/`P`/`N`
 - Polled every 30s (rate limit is 8-10 req/min); no answer for 3 min → `UNKNOWN`
-- **UID 124 = Харківський район**, matching the weather coordinates. Do NOT use the
-  oblast UID (22): alerts there are announced per raion, so the oblast reads
-  "partial" nearly around the clock and the indicator stops meaning anything.
+- **UID 1293 = м. Харків** (city hromada). The UID directory flags it outright:
+  *"Тривоги в місті оголошуються окремо від області чи району"* — the city is
+  announced independently. Neither the oblast (22) nor the raion (124) tracks it:
+  measured with the city calm, raion 124 answered `A` and oblast 22 answered `P`,
+  because outlying raions and border hromadas were under alert.
+  Full UID list: the Google Sheet linked from https://devs.alerts.in.ua
 - Token + UID live in NVS (namespace `cyd`, keys `al_token` / `al_uid`), never in git:
   ```bash
   T=$(cat ~/.alerts_token)
@@ -102,6 +105,12 @@ and the `accent_bar` stripe under the header:
 | `ALERT_PARTIAL` | orange ⚠ | orange |
 | `ALERT_CLEAR` | hidden | dim |
 | `ALERT_UNKNOWN` | dim ↻ | dim |
+
+The icon sits in the 38px gap between clock (ends x=80) and weather (starts
+x=118). It is centred by giving the label the full gap width, not a fixed x:
+the glyphs differ in width (warning 31.5px, refresh 28.0px), so a hardcoded x
+centres one and offsets the other. Its `y` matches the clock's — same font,
+same baseline; the warning glyph's own `ofs_y=-4` already sits it lower.
 
 ### Session Key
 - Stored in `~/Library/LaunchAgents/com.claude.cyd-bridge.plist` (outside git, never committed)

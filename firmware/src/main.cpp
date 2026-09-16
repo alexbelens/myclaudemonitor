@@ -272,17 +272,19 @@ static void fetch_weather(void) {
  * Token and region UID live in NVS, never in git. Set them with:
  *   POST /api/config {"alert_token":"...","alert_uid":124}
  *
- * Default UID 124 = Харківський район, matching the weather coordinates.
- * The oblast-level UID (22) is deliberately NOT the default: alerts there
- * are announced per raion, so the oblast reports "partial" almost around
- * the clock and the indicator would never say anything useful.
+ * Default UID 1293 = м. Харків (Kharkiv city hromada). The upstream UID
+ * directory flags it explicitly: "Тривоги в місті оголошуються окремо від
+ * області чи району" — the city is announced independently, so neither the
+ * oblast (22) nor the raion (124) tracks it. Both were measured wrong in
+ * practice: with the city calm, the raion still answered "A" and the oblast
+ * "P", because outlying raions and border hromadas were under alert.
  * ============================================================ */
 
 #define ALERT_POLL_MS   (30UL * 1000UL)        /* 2 req/min — soft limit is 8-10 */
 #define ALERT_STALE_MS  (3UL * 60UL * 1000UL)  /* older than this -> UNKNOWN */
 
 static char          g_alert_token[96] = {0};
-static int           g_alert_uid       = 124;
+static int           g_alert_uid       = 1293;
 static unsigned long last_alert_ms     = 0;
 static unsigned long last_alert_ok_ms  = 0;
 static bool          alert_ok_seen     = false;
@@ -299,7 +301,7 @@ static const char* alert_state_name(alert_state_t st) {
 static void load_alert_from_nvs(void) {
     Preferences prefs;
     prefs.begin("cyd", true);
-    g_alert_uid = prefs.getInt("al_uid", 124);
+    g_alert_uid = prefs.getInt("al_uid", 1293);
     String t = prefs.getString("al_token", "");
     strncpy(g_alert_token, t.c_str(), sizeof(g_alert_token) - 1);
     prefs.end();
