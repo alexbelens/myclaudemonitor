@@ -421,12 +421,12 @@ WAIT_LIST_MAX = 5
 _TITLE_BAD = str.maketrans({c: " " for c in '"\\|~\n\r\t'})
 
 
-def _last_value(blob: str, key: str) -> str:
+def _last_value(blob: str, key: str, first: bool = False) -> str:
     m = list(re.finditer(r'"%s":"((?:[^"\\]|\\.)*)"' % key, blob))
     if not m:
         return ""
     try:
-        return json.loads('"%s"' % m[-1].group(1))
+        return json.loads('"%s"' % m[0 if first else -1].group(1))
     except ValueError:
         return ""
 
@@ -457,7 +457,8 @@ def chat_info(sid: str) -> tuple[str, str]:
             blob = fh.read()
     except OSError:
         return sid[:8], ""
-    cwd = _last_value(blob, "cwd")
+    # Where the chat was started: Claude may cd into subfolders later on.
+    cwd = _last_value(blob, "cwd", first=True)
     # A chat started from ~ has no project; the home folder's name isn't one.
     project = "" if os.path.normpath(cwd) == str(Path.home()) else os.path.basename(cwd)
     title = (_last_value(blob, "customTitle") or _last_value(blob, "aiTitle")
