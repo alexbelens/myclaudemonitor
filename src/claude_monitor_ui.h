@@ -130,6 +130,7 @@ static lv_obj_t *lbl_alert;
 static lv_obj_t *accent_bar;
 
 /* Three limits, equal weight, fixed order: 5H, 7D, per-model weekly */
+#define SHOW_SCOPED_LIMIT 0     /* per-model cap row; needs a layout slot if turned on */
 #define LIMIT_COUNT 3
 static lv_obj_t *lim_title[LIMIT_COUNT];
 static lv_obj_t *lim_pct[LIMIT_COUNT];
@@ -560,7 +561,9 @@ static void update_wifi_ui(void) {
 static void update_ui(void) {
     char tmp[32], remain[20];
 
-    bool has_scoped = (g_data.sc_name[0] != '\0');
+    /* The per-model weekly cap (Fable/Opus) is hidden for now: not in use,
+     * and its row went to bigger text. It is also left out of "tired". */
+    bool has_scoped = SHOW_SCOPED_LIMIT && (g_data.sc_name[0] != '\0');
 
     /* Fixed order — nothing jumps around between refreshes */
     const char *nm[LIMIT_COUNT] = { "5H", "7D", g_data.sc_name };
@@ -601,13 +604,13 @@ static void update_ui(void) {
 /* ============================================================
  * BUILD: MONITOR SCREEN
  *
- *  y=  0.. 70  Header: clock / date  |  temp / cond
- *  y= 70.. 73  Alert stripe (air raid)
- *  y= 80..103  5H row:  name, time left, %  /  thin bar
- *  y=107..130  7D row
- *  y=134..157  Per-model weekly cap (Fable/Opus); hidden if the plan has none
- *  y=162       Divider
- *  y=163..268  Pet room: window, items, Claude (claude_pet.h)
+ *  y=  0.. 58  Header: clock / date  |  temp / cond
+ *  y= 58.. 61  Alert stripe (air raid), right under the date line
+ *  y= 66..102  5H row:  name, time left, %  /  bar
+ *  y=104..140  7D row
+ *              (per-model cap row: off, see SHOW_SCOPED_LIMIT)
+ *  y=146       Divider
+ *  y=147..268  Pet room: window, items, Claude (claude_pet.h)
  *  y=270..292  Pet status: level, XP, rewards
  *  y=296       Tab bar
  * ============================================================ */
@@ -617,7 +620,7 @@ static void build_monitor_screen(lv_obj_t *scr) {
 
     /* ── Header (0..70) ── */
     lv_obj_t *hdr = lv_obj_create(scr);
-    lv_obj_set_size(hdr, 240, 70);
+    lv_obj_set_size(hdr, 240, 58);
     lv_obj_set_pos(hdr, 0, 0);
     lv_obj_set_style_bg_color(hdr, CM_HEADER_BG, 0);
     lv_obj_set_style_bg_opa(hdr, LV_OPA_COVER, 0);
@@ -634,9 +637,9 @@ static void build_monitor_screen(lv_obj_t *scr) {
 
     lbl_date = lv_label_create(hdr);
     lv_label_set_text(lbl_date, "---");
-    lv_obj_set_style_text_font(lbl_date, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_font(lbl_date, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(lbl_date, CM_TEXT_SEC, 0);
-    lv_obj_set_pos(lbl_date, 8, 44);
+    lv_obj_set_pos(lbl_date, 8, 38);
 
     lbl_weather_temp = lv_label_create(hdr);
     lv_label_set_text(lbl_weather_temp, "--");
@@ -648,10 +651,11 @@ static void build_monitor_screen(lv_obj_t *scr) {
 
     lbl_weather_cond = lv_label_create(hdr);
     lv_label_set_text(lbl_weather_cond, "--");
-    lv_obj_set_style_text_font(lbl_weather_cond, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_font(lbl_weather_cond, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(lbl_weather_cond, CM_TEXT_SEC, 0);
-    lv_obj_set_pos(lbl_weather_cond, 118, 44);
-    lv_obj_set_width(lbl_weather_cond, 114);
+    lv_obj_set_pos(lbl_weather_cond, 106, 38);
+    lv_obj_set_width(lbl_weather_cond, 126);
+    lv_label_set_long_mode(lbl_weather_cond, LV_LABEL_LONG_DOT);  /* "Thunderstorm+hail" */
     lv_obj_set_style_text_align(lbl_weather_cond, LV_TEXT_ALIGN_RIGHT, 0);
 
     /* ── Air raid icon — lives in the dead gap between the clock and the
@@ -683,43 +687,44 @@ static void build_monitor_screen(lv_obj_t *scr) {
     lv_obj_set_style_text_align(lbl_alert, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_add_flag(lbl_alert, LV_OBJ_FLAG_HIDDEN);
 
-    /* ── Alert stripe (y=70..73) — green=safe, red=alert ── */
+    /* ── Alert stripe (y=58..61), directly under the date line ── */
     accent_bar = lv_obj_create(scr);
     lv_obj_set_size(accent_bar, 240, 3);
-    lv_obj_set_pos(accent_bar, 0, 70);
+    lv_obj_set_pos(accent_bar, 0, 58);
     lv_obj_set_style_bg_color(accent_bar, CM_DIVIDER, 0);
     lv_obj_set_style_bg_opa(accent_bar, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(accent_bar, 0, 0);
     lv_obj_set_style_radius(accent_bar, 0, 0);
     lv_obj_set_scrollbar_mode(accent_bar, LV_SCROLLBAR_MODE_OFF);
 
-    /* ── Three limit rows (y=80 / 107 / 134), fixed order. Each: name, time
-     *    to reset right after it, percentage on the right, a thin bar under.
-     *    Kept compact so the pet's room gets the space below. ── */
+    /* ── Limit rows (y=66 / 104), fixed order. Each: name and percentage in
+     *    the big font, time to reset right after the name, a bar under.
+     *    Only 5H and 7D are shown (SHOW_SCOPED_LIMIT); the third set of
+     *    objects still exists so re-enabling it is a layout change only. ── */
     for (int i = 0; i < LIMIT_COUNT; i++) {
-        int y = 80 + i * 27;
+        int y = 66 + i * 38;
 
-        lim_title[i] = make_label(scr, "--", &lv_font_montserrat_14, CM_TEXT_SEC, 8, y);
+        lim_title[i] = make_label(scr, "--", &lv_font_montserrat_22, CM_TEXT_SEC, 8, y);
 
         lim_pct[i] = lv_label_create(scr);
         lv_label_set_text(lim_pct[i], "0%");
-        lv_obj_set_style_text_font(lim_pct[i], &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_font(lim_pct[i], &lv_font_montserrat_22, 0);
         lv_obj_set_style_text_color(lim_pct[i], CM_TEXT_PRIM, 0);
-        lv_obj_set_pos(lim_pct[i], 150, y - 1);
-        lv_obj_set_width(lim_pct[i], 82);
+        lv_obj_set_pos(lim_pct[i], 140, y);
+        lv_obj_set_width(lim_pct[i], 92);
         lv_obj_set_style_text_align(lim_pct[i], LV_TEXT_ALIGN_RIGHT, 0);
 
-        lim_bar[i] = make_bar(scr, CM_ACCENT, 8, y + 17, 224, 6);
-        lv_obj_set_style_radius(lim_bar[i], 3, LV_PART_MAIN);
-        lv_obj_set_style_radius(lim_bar[i], 3, LV_PART_INDICATOR);
+        lim_bar[i] = make_bar(scr, CM_ACCENT, 8, y + 28, 224, 8);
+        lv_obj_set_style_radius(lim_bar[i], 4, LV_PART_MAIN);
+        lv_obj_set_style_radius(lim_bar[i], 4, LV_PART_INDICATOR);
 
         lim_reset[i] = lv_label_create(scr);
         lv_label_set_text(lim_reset[i], "");
-        lv_obj_set_style_text_font(lim_reset[i], &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(lim_reset[i], CM_TEXT_DIM, 0);
-        lv_obj_set_pos(lim_reset[i], 36, y + 1);
+        lv_obj_set_style_text_font(lim_reset[i], &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(lim_reset[i], CM_TEXT_SEC, 0);   /* DIM is too faint at this size */
+        lv_obj_set_pos(lim_reset[i], 44, y + 5);
     }
-    make_divider(scr, 162, CM_DIVIDER);
+    make_divider(scr, 146, CM_DIVIDER);
 
     /* ── The pet's room and status row (claude_pet.h) ── */
     pet_build(scr);

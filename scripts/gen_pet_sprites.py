@@ -189,8 +189,9 @@ SMALL = {  # drawn at scale 2
     "tail":  ["EEEE", "EEE.", "EE..", "E..."],
 }
 
-SCALE = 3
-SMALL_SCALE = 2
+SCALE = 4          # Claude and everything he wears
+ROOM_SCALE = 3     # window and room items: at 4 they don't fit beside him
+SMALL_SCALE = 2    # hearts, sparks, star, bubble tail
 
 
 def validate(name, rows):
@@ -274,9 +275,12 @@ def main():
     total = 0
     for name, (g, _) in FRAMES:
         total += emit(out, name, ["".join(r) for r in g], SCALE)
-    for table in (HATS, OVERLAYS, ITEMS, WINDOWS):
+    for table in (HATS, OVERLAYS):
         for name, rows in table.items():
             total += emit(out, name, rows, SCALE)
+    for table in (ITEMS, WINDOWS):
+        for name, rows in table.items():
+            total += emit(out, name, rows, ROOM_SCALE)
     for name, rows in SMALL.items():
         total += emit(out, name, rows, SMALL_SCALE)
 

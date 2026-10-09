@@ -1,7 +1,7 @@
 /* ============================================================
  * claude_pet.h — the Claude Code mascot as a small tamagotchi
  *
- * Lives in the room strip of the Monitor screen (y=163..292). Everything it
+ * Lives in the room strip of the Monitor screen (y=147..292). Everything it
  * does is driven by signals the device already has:
  *
  *   waiting sessions  -> waves, speech bubble   (bridge payload "waiting")
@@ -31,7 +31,7 @@
 #include "pet_sprites.h"
 
 /* ── Geometry ── */
-#define PET_ROOM_TOP   163
+#define PET_ROOM_TOP   147
 #define PET_FLOOR      256      /* feet stand on this line */
 #define PET_CX         120
 
@@ -631,10 +631,10 @@ static void pet_render(uint32_t now) {
         }
         int32_t bx = x0 + w - 4;
         if (bx > 236 - pet_bubble_w) bx = 236 - pet_bubble_w;
-        int32_t by = top_y - 16 - 6;
+        int32_t by = top_y - 18 - 6;
         if (by < PET_ROOM_TOP + 3) by = PET_ROOM_TOP + 3;
         pet_pos(pet_bubble, bx, by);
-        pet_pos(pet_tail, bx + 4, by + 15);
+        pet_pos(pet_tail, bx + 4, by + 17);
     }
 
     if (pet_toast_until && now > pet_toast_until) { pet_show(pet_toast, false); pet_toast_until = 0; }
@@ -651,7 +651,7 @@ static void pet_build(lv_obj_t *scr) {
     if (P.version != PET_PROGRESS_VERSION) pet_progress_defaults();
 
     pet_rect(scr, 0, PET_ROOM_TOP, 240, PET_FLOOR - PET_ROOM_TOP, 0x0C0C22);   /* wall */
-    pet_win = pet_image(scr, &pet_img_win_day, 14, 172, false);
+    pet_win = pet_image(scr, &pet_img_win_day, 14, 158, false);
     pet_rect(scr, 0, PET_FLOOR, 240, 12, 0x11112E);                            /* floor */
     pet_rect(scr, 0, PET_FLOOR, 240, 1, 0x1D1D46);
 
@@ -686,7 +686,7 @@ static void pet_build(lv_obj_t *scr) {
     }
 
     pet_bubble = lv_obj_create(scr);
-    lv_obj_set_size(pet_bubble, LV_SIZE_CONTENT, 16);
+    lv_obj_set_size(pet_bubble, LV_SIZE_CONTENT, 18);
     lv_obj_set_style_bg_color(pet_bubble, lv_color_hex(0xEEEEFF), 0);
     lv_obj_set_style_bg_opa(pet_bubble, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(pet_bubble, 0, 0);
@@ -697,7 +697,7 @@ static void pet_build(lv_obj_t *scr) {
     lv_obj_remove_flag(pet_bubble, LV_OBJ_FLAG_CLICKABLE);
     pet_bubble_lbl = lv_label_create(pet_bubble);
     lv_label_set_text(pet_bubble_lbl, "1 waiting");
-    lv_obj_set_style_text_font(pet_bubble_lbl, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_font(pet_bubble_lbl, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(pet_bubble_lbl, lv_color_hex(0x0A0A20), 0);
     lv_obj_center(pet_bubble_lbl);
     lv_obj_add_flag(pet_bubble, LV_OBJ_FLAG_HIDDEN);
@@ -705,7 +705,7 @@ static void pet_build(lv_obj_t *scr) {
 
     pet_toast = lv_label_create(scr);
     lv_label_set_text(pet_toast, "");
-    lv_obj_set_style_text_font(pet_toast, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(pet_toast, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(pet_toast, CM_YELLOW, 0);
     lv_obj_set_style_bg_color(pet_toast, lv_color_hex(0x0A0A20), 0);
     lv_obj_set_style_bg_opa(pet_toast, LV_OPA_COVER, 0);
@@ -727,26 +727,26 @@ static void pet_build(lv_obj_t *scr) {
     /* Status row: level, XP to the next level, rewards collected */
     pet_rect(scr, 0, 270, 240, 1, 0x18183A);
     pet_lv = lv_label_create(scr);
-    lv_obj_set_style_text_font(pet_lv, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(pet_lv, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(pet_lv, CM_TEXT_PRIM, 0);
-    lv_obj_set_pos(pet_lv, 8, 276);
+    lv_obj_set_pos(pet_lv, 8, 275);
     pet_xpbar = lv_bar_create(scr);
-    lv_obj_set_size(pet_xpbar, 116, 6);
-    lv_obj_set_pos(pet_xpbar, 46, 280);
+    lv_obj_set_size(pet_xpbar, 88, 8);
+    lv_obj_set_pos(pet_xpbar, 52, 280);
     lv_obj_set_style_bg_color(pet_xpbar, CM_BAR_BG, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(pet_xpbar, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_radius(pet_xpbar, 3, LV_PART_MAIN);
+    lv_obj_set_style_radius(pet_xpbar, 4, LV_PART_MAIN);
     lv_obj_set_style_bg_color(pet_xpbar, CM_GREEN, LV_PART_INDICATOR);
-    lv_obj_set_style_radius(pet_xpbar, 3, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(pet_xpbar, 4, LV_PART_INDICATOR);
     pet_xplbl = lv_label_create(scr);
-    lv_obj_set_style_text_font(pet_xplbl, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(pet_xplbl, CM_TEXT_DIM, 0);
-    lv_obj_set_pos(pet_xplbl, 168, 277);
+    lv_obj_set_style_text_font(pet_xplbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(pet_xplbl, CM_TEXT_SEC, 0);
+    lv_obj_set_pos(pet_xplbl, 146, 277);
     pet_image(scr, &pet_img_star, 206, 277, false);
     pet_awards = lv_label_create(scr);
-    lv_obj_set_style_text_font(pet_awards, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(pet_awards, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(pet_awards, CM_TEXT_PRIM, 0);
-    lv_obj_set_pos(pet_awards, 222, 276);
+    lv_obj_set_pos(pet_awards, 222, 275);
 
     pet_update_status();
     pet_render(lv_tick_get());
