@@ -187,7 +187,10 @@ the transcript: `customTitle` (after `/rename`), else `aiTitle`, else the
 project folder from `cwd`. The device drops `waiting` and `working` to 0 if the
 bridge goes quiet for 5 min.
 
-**Waiting ticker.** While any chat waits, the 7D row becomes a ticker: title
+**Waiting ticker.** A chat counts as waiting only after it has waited 60 s
+(`WAIT_SHOW_SEC` in the bridge), so the chat you're typing into doesn't flash
+on the screen after every answer; the pet's waving follows the same rule.
+While any chat waits, the 7D row becomes a ticker: title
 (Cyrillic font, cut with "…"), "ждёт ответа / просит разрешение / задал вопрос ·
 N мин", a coloured dot (blue / orange / yellow) and "1/3"; it rotates every
 3 s. With nobody waiting the 7D limit is back.

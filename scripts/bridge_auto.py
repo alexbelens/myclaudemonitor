@@ -373,6 +373,9 @@ def send_wifi(payload: dict, host: str) -> bool:
 SESSIONS_DIR      = Path.home() / ".claude" / "cyd-sessions"
 SESSION_STALE_SEC = 12 * 3600
 WORKING_SEC       = 120     # a "busy" session touched this recently is working
+WAIT_SHOW_SEC     = 60      # a chat counts as waiting only after this long: the
+                            # one you're typing into right now shouldn't flash
+                            # on the screen after every answer
 
 # The hook appends one letter per Claude action to .xp; these are the pet's XP.
 XP_LOG       = SESSIONS_DIR / ".xp"
@@ -401,7 +404,7 @@ def session_scan() -> tuple[list, int]:
             words = f.read_text().split()
         except OSError:
             continue
-        if words and words[0] == "waiting":
+        if words and words[0] == "waiting" and age >= WAIT_SHOW_SEC:
             waiting.append((f.name, words[1] if len(words) > 1 else "reply", age))
         elif words and words[0] == "busy" and age <= WORKING_SEC:
             working += 1
