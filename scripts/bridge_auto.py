@@ -32,6 +32,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import zlib
 import glob
 from datetime import datetime, timezone
 from pathlib import Path
@@ -377,12 +378,16 @@ WAIT_SHOW_SEC     = 0       # a chat counts as waiting right away: seeing it at
                             # once matters more than the chat you're typing into
                             # showing up after every answer
 
-# The hook appends one letter per Claude action to .xp; these are the pet's XP.
+# The hook appends "<session> <event>" lines to .xp. The device prices them
+# (answer 10, reply 5, subagent 15, compaction 20); the bridge only counts,
+# and drops an event that repeats the previous one of the same session.
 XP_LOG       = SESSIONS_DIR / ".xp"
-XP_WEIGHTS   = {"s": 3,     # finished an answer
-                "e": 3,     # edited or created a file
-                "t": 1}     # any other successful tool call
-XP_PUSH_SEC  = 10           # batch XP pushes between usage polls
+XP_EVENTS    = {"S": "xs",   # Claude finished an answer
+                "Q": "xq",   # you answered a permission or a question
+                "A": "xa",   # a subagent started
+                "C": "xc"}   # the context was compacted
+XP_PUSH_SEC  = 10           # batch event pushes between usage polls
+AGENT_STALE_SEC = 30 * 60   # a lost SubagentStop shouldn't count an agent forever
 
 
 def session_scan() -> tuple[list, int]:
@@ -508,20 +513,66 @@ def wait_list(entries: list) -> str:
     return "~".join(f"{k}|{m}|{t}|{p}" for k, m, t, p in entries)
 
 
-def take_xp() -> int:
-    """Claim everything logged so far. The rename makes it atomic: the hook
-    opens .xp by name on every append, so new actions start a fresh file."""
+_last_event: dict = {}        # session -> its last XP event, for de-duplication
+_agents: dict = {}            # session -> (subagents running, last seen)
+
+
+def new_pending() -> dict:
+    return {"xs": 0, "xq": 0, "xa": 0, "xc": 0, "ag": 0, "sp": set()}
+
+
+def take_events(pend: dict) -> None:
+    """Claim everything logged so far into `pend`. The rename makes it atomic:
+    the hook opens .xp by name on every append, so new events start a fresh
+    file."""
     claimed = SESSIONS_DIR / ".xp.taking"
     try:
         XP_LOG.rename(claimed)
     except OSError:
-        return 0
+        return
     try:
-        return sum(XP_WEIGHTS.get(c, 0) for c in claimed.read_text(errors="ignore"))
+        lines = claimed.read_text(errors="ignore").splitlines()
     except OSError:
-        return 0
+        lines = []
     finally:
         claimed.unlink(missing_ok=True)
+    now = time.time()
+    for line in lines:
+        parts = line.split()
+        if len(parts) != 2:
+            continue                        # e.g. the old one-letter format
+        sid, ev = parts
+        if ev in ("A", "a"):                # concurrency counts every agent
+            running = _agents.get(sid, (0, now))[0]
+            running = running + 1 if ev == "A" else max(0, running - 1)
+            _agents[sid] = (running, now)
+            for k, (n, seen) in list(_agents.items()):
+                if now - seen > AGENT_STALE_SEC:
+                    del _agents[k]
+            pend["ag"] = max(pend["ag"], sum(n for n, _ in _agents.values()))
+        if ev not in XP_EVENTS:
+            continue
+        if _last_event.get(sid) == ev:      # same event twice in a row: once
+            continue
+        _last_event[sid] = ev
+        pend[XP_EVENTS[ev]] += 1
+        if ev == "S":
+            project = chat_info(sid)[1]
+            if project:
+                pend["sp"].add(f"{zlib.crc32(project.encode('utf-8')) & 0xffffffff:08x}")
+
+
+def pending_fields(pend: dict) -> dict:
+    out = {k: pend[k] for k in ("xs", "xq", "xa", "xc") if pend[k]}
+    if pend["ag"]:
+        out["ag"] = pend["ag"]
+    if pend["sp"]:
+        out["sp"] = ",".join(sorted(pend["sp"])[:5])
+    return out
+
+
+def pending_any(pend: dict) -> bool:
+    return any(pend[k] for k in ("xs", "xq", "xa", "xc", "ag")) or bool(pend["sp"])
 
 
 def send_partial(data: dict, mode: str, ser, host: str) -> bool:
@@ -593,7 +644,7 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float, wifi_
             sys.exit(1)
 
     plan_name = plan or source_plan
-    pending_xp = 0              # XP claimed from the log but not yet delivered
+    pend = new_pending()        # events claimed from the log, not yet delivered
 
     while True:
         now = time.time()
@@ -648,9 +699,9 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float, wifi_
 
         waiting, working = session_scan()
         entries = wait_entries(waiting)
-        pending_xp += take_xp()
-        payload.update({"waiting": len(waiting), "working": working,
-                        "wl": wait_list(entries), "xp_add": pending_xp})
+        take_events(pend)
+        payload.update({"waiting": len(waiting), "working": working, "wl": wait_list(entries)})
+        payload.update(pending_fields(pend))
 
         # Send
         ok = False
@@ -670,7 +721,7 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float, wifi_
                 mode = None
 
         if ok:
-            pending_xp = 0
+            pend = new_pending()
             status = ["OK", "CAUTION", "WARNING", "CRITICAL"][payload["warning_level"]]
             tag    = "[WiFi]" if mode == "wifi" else "[USB] "
             print(
@@ -694,13 +745,13 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float, wifi_
             waiting, working = session_scan()
             entries = wait_entries(waiting)
             key = ([(e[0], e[2]) for e in entries], working)   # who waits and why, not how long
-            pending_xp += take_xp()
-            xp_due = pending_xp > 0 and time.time() - last_xp_push >= XP_PUSH_SEC
+            take_events(pend)
+            xp_due = pending_any(pend) and time.time() - last_xp_push >= XP_PUSH_SEC
             if (key != last_key or xp_due) and mode is not None:
-                data = {"waiting": len(waiting), "working": working,
-                        "wl": wait_list(entries), "xp_add": pending_xp}
+                data = {"waiting": len(waiting), "working": working, "wl": wait_list(entries)}
+                data.update(pending_fields(pend))
                 if send_partial(data, mode, ser, wifi_host):
-                    last_key, pending_xp, last_xp_push = key, 0, time.time()
+                    last_key, pend, last_xp_push = key, new_pending(), time.time()
 
 
 def main():

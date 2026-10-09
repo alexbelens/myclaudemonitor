@@ -438,8 +438,9 @@ static void load_pet_from_nvs(void) {
     prefs.end();
     pet_load_progress(n == sizeof(p) ? &p : NULL);
     pet_save_cb = save_pet_to_nvs;
-    Serial.printf("[Pet] Lv %u, %u XP, rewards 0x%02X, streak %u\n",
-                  (unsigned)P.level, (unsigned)P.xp, (unsigned)P.unlocked, (unsigned)P.streak);
+    Serial.printf("[Pet] Lv %u, %u XP, achievements 0x%04X, streak %u\n",
+                  (unsigned)pet_level_of(P.total_xp), (unsigned)P.total_xp,
+                  (unsigned)P.achs, (unsigned)P.streak);
 }
 
 static void load_sleep_from_nvs(void) {
@@ -534,23 +535,24 @@ static void http_handle_status(void) {
     snprintf(resp, sizeof(resp),
         "{\"ok\":true,\"version\":\"4.0\",\"ip\":\"%s\","
         "\"alert\":\"%s\",\"alert_uid\":%d,\"has_token\":%s,"
-        "\"pet\":\"%s\",\"level\":%u,\"xp\":%u,\"xp_next\":%u,\"rewards\":%u,"
-        "\"streak\":%u,\"waiting\":%d,"
+        "\"pet\":\"%s\",\"level\":%u,\"xp\":%u,\"xp_next\":%u,\"achievements\":%d,"
+        "\"answers_today\":%u,\"streak\":%u,\"waiting\":%d,"
         "\"heap_free\":%u,\"lv_free\":%u,\"lv_used_pct\":%u,\"lv_frag_pct\":%u}",
         WiFi.localIP().toString().c_str(),
         alert_state_name(g_alert_state),
         g_alert_uid,
         g_alert_token[0] ? "true" : "false",
-        pet_state_name(), (unsigned)P.level, (unsigned)P.xp,
-        (unsigned)pet_level_cost(P.level), (unsigned)P.unlocked,
-        (unsigned)P.streak, pet_waiting_count(lv_tick_get()),
+        pet_state_name(), (unsigned)pet_level_of(P.total_xp), (unsigned)P.total_xp,
+        (unsigned)pet_level_floor(pet_level_of(P.total_xp) + 1), pet_popcount(P.achs),
+        (unsigned)P.answers_today, (unsigned)P.streak, pet_waiting_count(lv_tick_get()),
         (unsigned)ESP.getFreeHeap(), (unsigned)mon.free_size,
         (unsigned)mon.used_pct, (unsigned)mon.frag_pct);
     http_server.send(200, "application/json", resp);
 }
 
-/* Show a pet state/environment for a few seconds, to check the art on the
- * real screen:  POST /api/pet {"state":"waiting","env":"rain","sec":20}
+/* Show a pet state/environment, or the things a level unlocks, for a few
+ * seconds, to check the art on the real screen:
+ *   POST /api/pet {"state":"waiting","env":"rain","level":24,"sec":20}
  * Needs Content-Type: application/json — WebServer drops a form-encoded body
  * whose single field has no '=', so a bare `curl -d '{...}'` arrives empty. */
 static void http_handle_pet(void) {
@@ -559,7 +561,8 @@ static void http_handle_pet(void) {
     jstr(body.c_str(), "state", st, sizeof(st), "");
     jstr(body.c_str(), "env",   env, sizeof(env), "");
     int sec = jint(body.c_str(), "sec", 20);
-    pet_demo(st[0] ? st : NULL, env[0] ? env : NULL, sec);
+    int level = jint(body.c_str(), "level", 0);
+    pet_demo(st[0] ? st : NULL, env[0] ? env : NULL, level, sec);
     http_server.send(200, "application/json", "{\"ok\":true}");
 }
 

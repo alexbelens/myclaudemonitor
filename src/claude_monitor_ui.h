@@ -317,8 +317,16 @@ static void load_data_from_json(const char *buf) {
         parse_wait_list(wl);
     }
     if (jfind(buf, "working")) pet_set_working(jint(buf, "working", 0));
-    /* XP is a delta: each push carries only what was counted since the last. */
-    if (jfind(buf, "xp_add"))  pet_add_activity(jint(buf, "xp_add", 0));
+    /* Claude's actions since the bridge's last push, already de-duplicated:
+     * answers, your replies to permissions/questions, subagents, compactions. */
+    if (jfind(buf, "xs") || jfind(buf, "xq") || jfind(buf, "xa") || jfind(buf, "xc"))
+        pet_on_events(jint(buf, "xs", 0), jint(buf, "xq", 0), jint(buf, "xa", 0), jint(buf, "xc", 0));
+    if (jfind(buf, "ag")) pet_on_agents(jint(buf, "ag", 0));
+    if (jfind(buf, "sp")) {
+        char sp[64];
+        jstr(buf, "sp", sp, sizeof(sp), "");
+        if (sp[0]) pet_on_projects(sp);
+    }
     if (jfind(buf, "fh_pct"))  g_usage_seen = true;
 }
 

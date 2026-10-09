@@ -139,53 +139,70 @@ already sits it lower.
 ### Pet (`src/claude_pet.h`)
 The Claude Code mascot as a small tamagotchi in the room under the limits.
 
-**Graphics.** Sprites are pixel grids in `scripts/gen_pet_sprites.py`, baked
-×3 into RGB565A8 arrays in `src/pet_sprites.h` (~130 KB of flash). LVGL blits
-uncompressed images straight from flash with no RAM copy; palette images would
-be expanded to ARGB8888 in RAM on every draw, which the 48 KB heap can't carry.
-After editing a grid: `python3 scripts/gen_pet_sprites.py`, then rebuild.
-Design prototype (both styles, all states): https://claude.ai/artifact/7TqcLJwSLg54JMyKiF62uY
+**Graphics.** Every sprite and the unlock/achievement tables live in
+`scripts/gen_pet_sprites.py`; it bakes them ×4 (Claude and what he wears) or ×3
+(room, companions) into RGB565A8 arrays in `src/pet_sprites.h` (~380 KB of
+flash; flash is ~88% full). LVGL blits uncompressed images straight from flash
+with no RAM copy; palette images would be expanded to ARGB8888 in RAM on every
+draw, which the 48 KB heap can't carry. After editing a grid:
+`python3 scripts/gen_pet_sprites.py`, then rebuild. Positions of worn things
+are art cells relative to the frame's left edge and the top of the head; held
+things hang from the left-hand cell the generator finds in each frame.
+Reference page (all levels, items, achievements, live screen):
+https://claude.ai/artifact/7TqcLJwSLg54JMyKiF62uY
 
-**State, highest priority first:** demo → joy (tap, level-up, 1–2 s) →
-waiting (a Claude Code session waits for you) → tired (any limit ≥ 90%) →
-working (Claude acted in some session in the last 2 min) → sleep (night by the sleep-schedule
-hours) → bored (no work for 2+ local days) → sleep (no work for 2 h) → idle.
-Overlays on top: helmet during an air raid alert (replaces the hat), umbrella
-in rain (idle/waiting poses), scarf at ≤ 0 °C or snow; the window shows
-day/night/rain/snow and the room dims at night.
+**XP and levels** — identical to a colleague's pet, so they compare one to one:
++10 answer finished (Stop; StopFailure gives none), +5 you answered a
+permission or question, +15 subagent started, +20 context compacted. The same
+event twice in a row in one session counts once (the bridge de-duplicates).
+XP never goes down. Total XP for level L: `200 × (L − 1)²`. Measured pace over
+two weeks of transcripts: ~2200 XP/day (Lv 10 ≈ a week, Lv 30 ≈ 2.5 months).
 
-**Rules.**
-- XP is the pet's — Claude's — own work, counted by the hooks: +3 for a
-  finished answer (Stop), +3 for a file edit (Edit/Write/MultiEdit/
-  NotebookEdit), +1 for any other successful tool call, 0 for failed calls
-  and for your prompts. Plus +25 for the first action of a local day and +1
-  per tap (max 10 a day). Limits no longer give XP.
-- Measured over two weeks of transcripts, a busy day is ~150 answers,
-  ~20 edits and ~850 other tool calls, so ~1300 XP.
-- Level cost: `150 × level + 150` XP (Lv1→2 = 300; Lv 10 ≈ a week, Lv 20 ≈ a month).
-- Rewards (permanent): beanie at Lv 3, party hat at Lv 5, crown at Lv 10,
-  plant for a 7-day work streak, mug for 5 days started before 09:00,
-  trophy for 7 days without 5H hitting 100% with work on at least 5 of them.
-- The newest hat goes on automatically; long-press the pet to cycle hats.
-- Progress is one NVS blob (`cyd` / `pet`), written at most every 5 min plus
-  on level-ups and unlocks.
+**Unlocks**: a thing on every level 2–30 (cap, duck, glasses, beanie,
+headphones, poster, scarf, party hat, crown, crab, cloak until 22, shades,
+coffee mug, hoodie, hachimaki, lava lamp, container whale, neon sign, server
+rack, wizard hat, black katana, guitar, vyshyvanka, robot, cat, sunflower,
+grimoire, wings, golden aura). One per slot is shown — the newest; long-press
+the pet to pick the hat. Taps give hearts, not XP.
 
-**Sessions and XP.** `scripts/cyd_session_hook.sh` runs from hooks in
-`~/.claude/settings.json`: Stop/StopFailure → `reply`; Notification
-`permission_prompt` → `permission`; Notification
+**Achievements** (15, medals on the room's shelf, grey until earned): first
+answer, answer between 2–5 am, 5 days started before 9, three subagents at
+once, a limit at 100%, 100 answers a day, 7-day streak, a week without 5H at
+100%, 5 projects a day, 10 compactions, 100 taps, Saturday + Sunday, 1000
+answers, 5 chats waiting at once, 100 replies to permissions/questions.
+
+**State, highest priority first:** demo → joy (tap, level-up, achievement,
+5H reset) → waiting (a chat waits for you) → exhausted (5H 100%: slumped, x x
+eyes, smoke) → working (Claude acted in the last 2 min) → tired (5H ≥ 75%,
+sweat from 90%) → sleep (night by the sleep-schedule hours) → bored (3 days
+without Claude: sits under a rain cloud) → sleep (2 h idle) → idle (yawns now
+and then from 5H 50%). Overlays: helmet during an air raid alert (replaces the
+hat), umbrella in rain, scarf at ≤ 0 °C; the window shows day/night/rain/snow
+and the room dims at night. Level-ups, unlocks and achievements queue up as
+toasts in Russian.
+
+Progress is one NVS blob (`cyd` / `pet`, `PET_PROGRESS_VERSION` 2), written at
+most every 5 min plus on level-ups and achievements; a version bump resets it.
+
+**Sessions and events.** `scripts/cyd_session_hook.sh` runs from hooks in
+`~/.claude/settings.json`: Stop → `reply`; StopFailure → `failed`;
+Notification `permission_prompt` → `permission`; Notification
 `elicitation_dialog|agent_needs_input` → `question`; UserPromptSubmit,
-PostToolUse, PostToolUseFailure → `busy`; SessionEnd → `end`. The kind comes
-from the matcher, not from the hook JSON. It writes one file per session to
-`~/.claude/cyd-sessions/` (`waiting <kind>` or `busy`) and appends one letter
-per action to `.xp` (`s` answer, `e` edit, `t` other tool). No network, always
-exits 0, synchronous so events can't land out of order.
+PostToolUse, PostToolUseFailure → `busy`; SubagentStart → `agent`;
+SubagentStop → `agent-end`; PreCompact → `compact`; SessionEnd → `end`. It
+writes one file per session to `~/.claude/cyd-sessions/` (`waiting <kind>` or
+`busy`) and appends `<session> <event>` lines to `.xp` (S answer, Q reply,
+A/a subagent start/stop, C compaction); going busy right after "waiting
+permission/question" is a Q. No network, always exits 0, synchronous so events
+can't land out of order.
 
 The bridge scans that directory every second (files untouched for 12 h are
-swept), claims `.xp` by renaming it, and pushes `waiting`/`wl`/`working`
-the moment they change and `xp_add` at most every 10 s. Chat titles come from
-the transcript: `customTitle` (after `/rename`), else `aiTitle`, else the
-project folder from `cwd`. The device drops `waiting` and `working` to 0 if the
-bridge goes quiet for 5 min.
+swept), claims `.xp` by renaming it, de-duplicates, and pushes
+`waiting`/`wl`/`working` the moment they change and the event counts
+(`xs xq xa xc`, max concurrent subagents `ag`, CRC32s of projects that answered
+`sp`) at most every 10 s. Chat titles come from the transcript: `customTitle`
+(after `/rename`), else `aiTitle`, else the project folder. The device drops
+`waiting`/`working` to 0 if the bridge goes quiet for 5 min.
 
 **Waiting ticker** shows the chat title in «quotes» (a chat named after its
 first message — "Монитор подвис" — otherwise reads like a device status) and
@@ -206,14 +223,16 @@ can't hide 7D for hours; with nobody waiting 7D just stays.
 **Checking the art on the screen:**
 ```bash
 curl -X POST http://claude-monitor.local/api/pet -H 'Content-Type: application/json' \
-     -d '{"state":"waiting","env":"rain","sec":20}'
-# states: idle working waiting tired sleep bored joy   env: clear rain snow cold night alert
+     -d '{"state":"waiting","env":"rain","level":24,"sec":20}'
+# states: idle working waiting tired sleep bored joy exhausted
+# env: clear rain snow cold night alert       level: show that level's things
 ```
 The `Content-Type` header is required on every device POST: without it curl sends a
 form, and the ESP32 WebServer drops a form field that has no `=`, so the body arrives
 empty and the request silently does nothing.
-`/api/status` also reports `pet`, `level`, `xp`, `rewards`, `streak`,
-`waiting`, and heap (`heap_free`, `lv_free`, `lv_frag_pct`).
+`/api/status` also reports `pet`, `level`, `xp` (total), `xp_next`,
+`achievements`, `answers_today`, `streak`, `waiting`, and heap (`heap_free`,
+`lv_free`, `lv_frag_pct`).
 
 ### Session Key
 - Stored in `~/Library/LaunchAgents/com.claude.cyd-bridge.plist` (outside git, never committed)

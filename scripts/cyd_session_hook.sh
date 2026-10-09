@@ -1,14 +1,18 @@
 #!/bin/sh
 # Claude Code hook: records whether this session is waiting for you, so the
-# CYD pet can wave, and logs Claude's actions, which are the pet's XP.
-# One small file per session in ~/.claude/cyd-sessions, plus an append-only
-# .xp log of one letter per action; bridge_auto.py reads both and pushes the
-# waiting count and the XP to the device.
+# CYD pet can wave, and logs the events the pet's XP is made of. One small
+# file per session in ~/.claude/cyd-sessions, plus an append-only .xp log of
+# "<session> <event>" lines; bridge_auto.py reads both, de-duplicates and
+# pushes them to the device.
 #
-#   cyd_session_hook.sh reply       Stop, StopFailure: finished, your turn
+#   cyd_session_hook.sh reply       Stop: finished, your turn
+#   cyd_session_hook.sh failed      StopFailure: stopped on an error (your turn, no XP)
 #   cyd_session_hook.sh permission  Notification permission_prompt
 #   cyd_session_hook.sh question    Notification elicitation_dialog|agent_needs_input
 #   cyd_session_hook.sh busy        UserPromptSubmit, PostToolUse, PostToolUseFailure
+#   cyd_session_hook.sh agent       SubagentStart
+#   cyd_session_hook.sh agent-end   SubagentStop
+#   cyd_session_hook.sh compact     PreCompact
 #   cyd_session_hook.sh end         SessionEnd
 #
 # The kind comes from the hook's matcher in settings.json rather than from a
@@ -34,23 +38,30 @@ sid=$(field session_id)
 [ -n "$sid" ] || exit 0
 
 mkdir -p "$dir" 2>/dev/null || exit 0
-# XP log: one letter per action, weighed by the bridge.
-#   s = finished an answer (Stop)   e = edited/created a file   t = any other tool
-# Failed tool calls and your own prompts earn nothing.
-case "$(field hook_event_name)" in
-    Stop) xp=s ;;
-    PostToolUse)
-        case "$(field tool_name)" in
-            Edit|Write|MultiEdit|NotebookEdit) xp=e ;;
-            *) xp=t ;;
+# XP events, priced on the device:
+#   S answer finished   Q you answered a permission or a question
+#   A subagent started  a subagent finished (no XP; for "three at once")
+#   C context compacted
+prev=$(cat "$dir/$sid" 2>/dev/null)
+ev=
+case "$state" in
+    reply) ev=S ;;
+    agent) ev=A ;;
+    agent-end) ev=a ;;
+    compact) ev=C ;;
+    busy)
+        # Going busy right after asking you for something = you answered it.
+        case "$prev" in
+            "waiting permission"|"waiting question") ev=Q ;;
+            *) [ "$(field tool_name)" = "AskUserQuestion" ] && ev=Q ;;
         esac ;;
-    *) xp= ;;
 esac
-[ -n "$xp" ] && printf '%s' "$xp" >> "$dir/.xp" 2>/dev/null
+[ -n "$ev" ] && printf '%s %s\n' "$sid" "$ev" >> "$dir/.xp" 2>/dev/null
 
 case "$state" in
     waiting) line="waiting reply" ;;          # older settings.json form
     reply|permission|question) line="waiting $state" ;;
+    failed) line="waiting reply" ;;
     busy) line="busy" ;;
     *) line= ;;
 esac
