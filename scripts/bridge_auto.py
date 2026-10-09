@@ -25,6 +25,7 @@ Usage:
 import argparse
 import getpass
 import json
+import os
 import re
 import socket
 import subprocess
@@ -309,7 +310,6 @@ def build_payload(usage: dict, plan_name: str) -> dict:
         "active_win":    usage["active_win"],
         "warning_level": warning,
         "plan_name":     plan_name or "Claude",
-        "waiting":       count_waiting(),
     }
 
 
@@ -356,7 +356,7 @@ def wifi_available(host: str) -> bool:
 
 def send_wifi(payload: dict, host: str) -> bool:
     try:
-        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         req  = urllib.request.Request(
             f"http://{host_addr(host)}/api/monitor", data=body,
             headers={"Content-Type": "application/json"})
@@ -372,26 +372,110 @@ def send_wifi(payload: dict, host: str) -> bool:
 # file behind, so anything untouched for 12h is ignored and swept away.
 SESSIONS_DIR      = Path.home() / ".claude" / "cyd-sessions"
 SESSION_STALE_SEC = 12 * 3600
+WORKING_SEC       = 120     # a "busy" session touched this recently is working
+
+# The hook appends one letter per Claude action to .xp; these are the pet's XP.
+XP_LOG       = SESSIONS_DIR / ".xp"
+XP_WEIGHTS   = {"s": 3,     # finished an answer
+                "e": 3,     # edited or created a file
+                "t": 1}     # any other successful tool call
+XP_PUSH_SEC  = 10           # batch XP pushes between usage polls
 
 
-def count_waiting() -> int:
+def session_scan() -> tuple[list, int]:
+    """Waiting sessions as (sid, kind, age_sec), oldest wait first, and the
+    number of sessions where Claude acted in the last WORKING_SEC."""
     try:
         entries = list(SESSIONS_DIR.iterdir())
     except OSError:
-        return 0
-    now, n = time.time(), 0
+        return [], 0
+    now, waiting, working = time.time(), [], 0
     for f in entries:
-        if f.name.endswith(".tmp"):
+        if f.name.startswith(".") or f.name.endswith(".tmp"):
             continue
         try:
-            if now - f.stat().st_mtime > SESSION_STALE_SEC:
+            age = now - f.stat().st_mtime
+            if age > SESSION_STALE_SEC:
                 f.unlink(missing_ok=True)
                 continue
-            if f.read_text().strip() == "waiting":
-                n += 1
+            words = f.read_text().split()
         except OSError:
             continue
-    return n
+        if words and words[0] == "waiting":
+            waiting.append((f.name, words[1] if len(words) > 1 else "reply", age))
+        elif words and words[0] == "busy" and age <= WORKING_SEC:
+            working += 1
+    waiting.sort(key=lambda w: -w[2])
+    return waiting, working
+
+
+# ── Chat titles for the waiting list ─────────────────────────────────────────
+# The name Claude Code shows in its session list: a /rename wins
+# ("custom-title"), else the generated one ("ai-title"), else the project
+# folder. Cached per transcript size, so a waiting chat is read once.
+_title_cache: dict = {}
+WAIT_LIST_MAX = 5
+_TITLE_BAD = str.maketrans({c: " " for c in '"\\|~\n\r\t'})
+
+
+def _last_value(blob: str, key: str) -> str:
+    m = list(re.finditer(r'"%s":"((?:[^"\\]|\\.)*)"' % key, blob))
+    if not m:
+        return ""
+    try:
+        return json.loads('"%s"' % m[-1].group(1))
+    except ValueError:
+        return ""
+
+
+def chat_title(sid: str) -> str:
+    hits = glob.glob(str(Path.home() / ".claude" / "projects" / "*" / f"{sid}.jsonl"))
+    if not hits:
+        return sid[:8]
+    path = hits[0]
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return sid[:8]
+    cached = _title_cache.get(sid)
+    if cached and cached[0] == size:
+        return cached[1]
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as fh:
+            blob = fh.read()
+    except OSError:
+        return sid[:8]
+    title = (_last_value(blob, "customTitle") or _last_value(blob, "aiTitle")
+             or os.path.basename(_last_value(blob, "cwd")) or sid[:8])
+    title = " ".join(title.translate(_TITLE_BAD).split())
+    # Keep it under the device's 72-byte buffer without splitting a letter.
+    while len(title.encode("utf-8")) > 70:
+        title = title[:-1]
+    _title_cache[sid] = (size, title)
+    return title
+
+
+def wait_list(waiting: list) -> str:
+    """'r|12|Монитор подвис~p|6|Релиз киоска' — kind, minutes, title."""
+    kinds = {"reply": "r", "permission": "p", "question": "q"}
+    return "~".join(f"{kinds.get(k, 'r')}|{int(age // 60)}|{chat_title(sid)}"
+                    for sid, k, age in waiting[:WAIT_LIST_MAX])
+
+
+def take_xp() -> int:
+    """Claim everything logged so far. The rename makes it atomic: the hook
+    opens .xp by name on every append, so new actions start a fresh file."""
+    claimed = SESSIONS_DIR / ".xp.taking"
+    try:
+        XP_LOG.rename(claimed)
+    except OSError:
+        return 0
+    try:
+        return sum(XP_WEIGHTS.get(c, 0) for c in claimed.read_text(errors="ignore"))
+    except OSError:
+        return 0
+    finally:
+        claimed.unlink(missing_ok=True)
 
 
 def send_partial(data: dict, mode: str, ser, host: str) -> bool:
@@ -400,7 +484,7 @@ def send_partial(data: dict, mode: str, ser, host: str) -> bool:
         return send_wifi(data, host)
     if mode == "serial" and ser:
         try:
-            ser.write((json.dumps(data, separators=(",", ":")) + "\n").encode("utf-8"))
+            ser.write((json.dumps(data, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8"))
             return True
         except Exception:
             return False
@@ -463,6 +547,7 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float, wifi_
             sys.exit(1)
 
     plan_name = plan or source_plan
+    pending_xp = 0              # XP claimed from the log but not yet delivered
 
     while True:
         now = time.time()
@@ -515,6 +600,11 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float, wifi_
             time.sleep(interval)
             continue
 
+        waiting, working = session_scan()
+        pending_xp += take_xp()
+        payload.update({"waiting": len(waiting), "working": working,
+                        "wl": wait_list(waiting), "xp_add": pending_xp})
+
         # Send
         ok = False
         if mode == "wifi":
@@ -525,7 +615,7 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float, wifi_
                 last_wifi_check = 0
         elif mode == "serial" and ser:
             try:
-                line = json.dumps(payload, separators=(",", ":")) + "\n"
+                line = json.dumps(payload, separators=(",", ":"), ensure_ascii=False) + "\n"
                 ser.write(line.encode("utf-8"))
                 ok = True
             except Exception:
@@ -533,6 +623,7 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float, wifi_
                 mode = None
 
         if ok:
+            pending_xp = 0
             status = ["OK", "CAUTION", "WARNING", "CRITICAL"][payload["warning_level"]]
             tag    = "[WiFi]" if mode == "wifi" else "[USB] "
             print(
@@ -545,17 +636,23 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float, wifi_
                 end="", flush=True,
             )
 
-        # Sleep until the next usage poll, but push the waiting count the
-        # moment a session starts or stops waiting: that's the signal people
-        # watch the screen for, and 60s late is too late.
-        last_waiting = payload["waiting"]
+        # Sleep until the next usage poll, but push the session counts the
+        # moment they change (a waiting session is what people watch the
+        # screen for; 60s late is too late), and Claude's XP every 10s.
+        last_key = ([w[:2] for w in waiting], working)
+        last_xp_push = time.time()
         deadline = time.time() + interval
         while time.time() < deadline:
             time.sleep(1)
-            n = count_waiting()
-            if n != last_waiting and mode is not None:
-                if send_partial({"waiting": n}, mode, ser, wifi_host):
-                    last_waiting = n
+            waiting, working = session_scan()
+            key = ([w[:2] for w in waiting], working)    # who waits and why, not for how long
+            pending_xp += take_xp()
+            xp_due = pending_xp > 0 and time.time() - last_xp_push >= XP_PUSH_SEC
+            if (key != last_key or xp_due) and mode is not None:
+                data = {"waiting": len(waiting), "working": working,
+                        "wl": wait_list(waiting), "xp_add": pending_xp}
+                if send_partial(data, mode, ser, wifi_host):
+                    last_key, pending_xp, last_xp_push = key, 0, time.time()
 
 
 def main():

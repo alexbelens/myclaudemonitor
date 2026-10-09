@@ -129,6 +129,29 @@ static lv_obj_t *lbl_weather_cond;
 static lv_obj_t *lbl_alert;
 static lv_obj_t *accent_bar;
 
+/* Montserrat with Cyrillic, for chat titles (firmware/src/fonts, made with
+ * lv_font_conv — the built-in LVGL fonts are Latin-only). The PC simulator
+ * doesn't compile them yet and falls back to the Latin fonts. */
+#ifdef ESP32
+LV_FONT_DECLARE(cm_cyr_16)
+LV_FONT_DECLARE(cm_cyr_12)
+#define CM_FONT_CYR_16 (&cm_cyr_16)
+#define CM_FONT_CYR_12 (&cm_cyr_12)
+#else
+#define CM_FONT_CYR_16 (&lv_font_montserrat_14)
+#define CM_FONT_CYR_12 (&lv_font_montserrat_12)
+#endif
+
+/* Chats waiting for a reply, shown in the 7D row while there are any.
+ * Bridge sends "wl": "r|12|Монитор подвис~p|6|Релиз киоска" — kind
+ * (r reply / p permission / q question), minutes, title; oldest first. */
+#define WAIT_LIST_MAX 5
+typedef struct { char kind; int min; char title[72]; } wait_entry_t;
+static wait_entry_t g_wait[WAIT_LIST_MAX];
+static int g_wait_n   = 0;
+static int g_wait_idx = 0;
+static lv_obj_t *tk_dot, *tk_title, *tk_meta, *tk_pos;
+
 /* Three limits, equal weight, fixed order: 5H, 7D, per-model weekly */
 #define SHOW_SCOPED_LIMIT 0     /* per-model cap row; needs a layout slot if turned on */
 #define LIMIT_COUNT 3
@@ -236,6 +259,29 @@ static void jstr(const char *j, const char *k, char *o, size_t l, const char *d)
 /* The pet uses g_alert_state, the CM_* palette and the fonts above. */
 #include "claude_pet.h"
 
+static void parse_wait_list(const char *s) {
+    g_wait_n = 0;
+    while (*s && g_wait_n < WAIT_LIST_MAX) {
+        wait_entry_t *w = &g_wait[g_wait_n];
+        w->kind = *s;
+        const char *p = strchr(s, '|');
+        if (!p) break;
+        w->min = atoi(p + 1);
+        p = strchr(p + 1, '|');
+        if (!p) break;
+        p++;
+        const char *end = strchr(p, '~');
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        if (len >= sizeof(w->title)) len = sizeof(w->title) - 1;   /* bridge keeps it under */
+        memcpy(w->title, p, len);
+        w->title[len] = '\0';
+        g_wait_n++;
+        if (!end) break;
+        s = end + 1;
+    }
+    if (g_wait_idx >= g_wait_n) g_wait_idx = 0;
+}
+
 /* ============================================================
  * DATA LOADING
  * ============================================================ */
@@ -255,6 +301,14 @@ static void load_data_from_json(const char *buf) {
      * hooks). The bridge also sends this field alone the moment it changes,
      * so it's the field's presence that refreshes it, not its value. */
     if (jfind(buf, "waiting")) pet_set_waiting(jint(buf, "waiting", 0));
+    if (jfind(buf, "wl")) {
+        char wl[WAIT_LIST_MAX * 80];
+        jstr(buf, "wl", wl, sizeof(wl), "");
+        parse_wait_list(wl);
+    }
+    if (jfind(buf, "working")) pet_set_working(jint(buf, "working", 0));
+    /* XP is a delta: each push carries only what was counted since the last. */
+    if (jfind(buf, "xp_add"))  pet_add_activity(jint(buf, "xp_add", 0));
     if (jfind(buf, "fh_pct"))  g_usage_seen = true;
 }
 
@@ -558,6 +612,44 @@ static void update_wifi_ui(void) {
 /* ============================================================
  * UPDATE: MONITOR DATA (called when bridge sends payload)
  * ============================================================ */
+/* While a chat waits for you, the 7D row turns into a ticker: one chat at a
+ * time, rotating every 3 s. With nobody waiting the 7D limit is back. */
+static void ui_update_wait(void) {
+    if (!tk_title) return;
+    int total = pet_waiting_count(lv_tick_get());
+    int n = total > 0 ? g_wait_n : 0;
+    bool on = n > 0;
+
+    lv_obj_t *row7d[] = { lim_title[1], lim_pct[1], lim_bar[1], lim_reset[1] };
+    for (unsigned k = 0; k < sizeof(row7d) / sizeof(row7d[0]); k++) pet_show(row7d[k], !on);
+    pet_show(tk_dot, on);
+    pet_show(tk_title, on);
+    pet_show(tk_meta, on);
+    pet_show(tk_pos, on && total > 1);
+    if (!on) return;
+
+    if (g_wait_idx >= n) g_wait_idx = 0;
+    const wait_entry_t *w = &g_wait[g_wait_idx];
+    const char *what = w->kind == 'p' ? "просит разрешение"
+                     : w->kind == 'q' ? "задал вопрос" : "ждёт ответа";
+    char meta[64];
+    if (w->min < 1) snprintf(meta, sizeof(meta), "%s · только что", what);
+    else            snprintf(meta, sizeof(meta), "%s · %d мин", what, w->min);
+    char pos[12];
+    snprintf(pos, sizeof(pos), "%d/%d", g_wait_idx + 1, total);
+
+    lv_label_set_text(tk_title, w->title);
+    lv_label_set_text(tk_meta, meta);
+    lv_label_set_text(tk_pos, pos);
+    lv_obj_set_style_bg_color(tk_dot, w->kind == 'p' ? CM_ORANGE : w->kind == 'q' ? CM_YELLOW : CM_ACCENT, 0);
+}
+
+static void wait_ticker_cb(lv_timer_t *t) {
+    (void)t;
+    if (g_wait_n > 1) g_wait_idx = (g_wait_idx + 1) % g_wait_n;
+    ui_update_wait();      /* also hides the ticker once the waiting count expires */
+}
+
 static void update_ui(void) {
     char tmp[32], remain[20];
 
@@ -599,6 +691,7 @@ static void update_ui(void) {
         if ((i < 2 || has_scoped) && pc[i] > worst) worst = pc[i];
     }
     if (g_usage_seen) pet_on_usage((int)g_data.fh_pct, (int)worst);
+    ui_update_wait();      /* the loop above re-shows the 7D row; the ticker may own it */
 }
 
 /* ============================================================
@@ -724,6 +817,28 @@ static void build_monitor_screen(lv_obj_t *scr) {
         lv_obj_set_style_text_color(lim_reset[i], CM_TEXT_SEC, 0);   /* DIM is too faint at this size */
         lv_obj_set_pos(lim_reset[i], 44, y + 5);
     }
+
+    /* Waiting-chat ticker, in the 7D row's place (y=104..140) */
+    tk_dot = lv_obj_create(scr);
+    lv_obj_set_size(tk_dot, 7, 7);
+    lv_obj_set_pos(tk_dot, 8, 111);
+    lv_obj_set_style_radius(tk_dot, 2, 0);
+    lv_obj_set_style_border_width(tk_dot, 0, 0);
+    lv_obj_set_style_bg_opa(tk_dot, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(tk_dot, LV_OBJ_FLAG_SCROLLABLE);
+    tk_title = make_label(scr, "", CM_FONT_CYR_16, CM_TEXT_PRIM, 20, 104);
+    lv_obj_set_width(tk_title, 172);
+    lv_label_set_long_mode(tk_title, LV_LABEL_LONG_DOT);
+    tk_pos = make_label(scr, "", CM_FONT_CYR_12, CM_YELLOW, 196, 106);
+    lv_obj_set_width(tk_pos, 36);
+    lv_obj_set_style_text_align(tk_pos, LV_TEXT_ALIGN_RIGHT, 0);
+    tk_meta = make_label(scr, "", CM_FONT_CYR_12, CM_TEXT_SEC, 20, 124);
+    lv_obj_set_width(tk_meta, 212);
+    lv_label_set_long_mode(tk_meta, LV_LABEL_LONG_DOT);
+    lv_obj_t *tk_parts[] = { tk_dot, tk_title, tk_pos, tk_meta };
+    for (unsigned k = 0; k < sizeof(tk_parts) / sizeof(tk_parts[0]); k++)
+        lv_obj_add_flag(tk_parts[k], LV_OBJ_FLAG_HIDDEN);
+
     make_divider(scr, 146, CM_DIVIDER);
 
     /* ── The pet's room and status row (claude_pet.h) ── */
@@ -930,6 +1045,7 @@ static void claude_monitor_create_ui(void) {
     load_data_from_file();
 #endif
     update_ui();
+    lv_timer_create(wait_ticker_cb, 3000, NULL);
 }
 
 #endif /* CLAUDE_MONITOR_UI_H */

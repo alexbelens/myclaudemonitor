@@ -24,6 +24,7 @@ claude-monitor-cyd/
 ├── firmware/                     # ESP32 PlatformIO project
 │   ├── platformio.ini
 │   ├── src/main.cpp              # Arduino: HSPI display + LVGL + touch + WiFi + HTTP server
+│   ├── src/fonts/cm_cyr_*.c      # Montserrat 12/16 with Cyrillic (lv_font_conv, see below)
 │   └── include/
 │       ├── lv_conf.h             # LVGL 9.2: 16-bit, 48KB heap, BTN+BAR+LABEL+IMAGE
 │       └── User_Setup.h          # TFT_eSPI CYD pins (HSPI: 13/12/14/15/2)
@@ -53,7 +54,13 @@ claude-monitor-cyd/
 - Color depth: 16-bit RGB565
 - Heap: 48KB
 - Draw buffer: 320 x 20 lines (partial rendering)
-- Fonts: Montserrat 10 + 12 + 14 + 22 + 28 (Latin + LVGL symbols only — no Cyrillic on screen)
+- Fonts: built-in Montserrat 10 + 12 + 14 + 22 + 28 (Latin + LVGL symbols), plus
+  `cm_cyr_12` / `cm_cyr_16` with Cyrillic for chat titles, regenerated with:
+  ```bash
+  npx lv_font_conv@1.5.2 --font firmware/.pio/libdeps/cyd/lvgl/scripts/built_in_font/Montserrat-Medium.ttf \
+    -r 0x20-0x7E,0xAB,0xB0,0xB7,0xBB,0x400-0x45F,0x490-0x491,0x2013-0x2014,0x2026,0x2116 \
+    --size 16 --bpp 4 --format lvgl --no-compress --lv-include lvgl.h -o firmware/src/fonts/cm_cyr_16.c
+  ```
 - Widgets enabled: Label, Bar, Btn, Obj, Image
 - NEON/Helium .S assembly files must be deleted after `pio run` (ARM-only, breaks Xtensa)
 
@@ -67,8 +74,15 @@ Bridge sends JSON payload every 30s:
   "sd_reset_min":  4320,  // minutes until 7d block resets
   "warning_level": 1,     // 0=ok 1=50% 2=75% 3=90%
   "plan_name":     "Pro",
-  "waiting":       1      // Claude Code sessions waiting for a reply
+  "waiting":       1,     // Claude Code sessions waiting for you
+  "wl":            "r|12|Монитор подвис",  // up to 5: kind (r/p/q)|minutes|title
+  "working":       1,     // sessions where Claude acted in the last 2 min
+  "xp_add":        42     // Claude's actions since the last push (a delta)
 }
+```
+Sent as UTF-8 (`ensure_ascii=False`): the device's JSON reader copies bytes
+and does not decode `\uXXXX`.
+```
 ```
 
 ### Transport Protocol
@@ -134,17 +148,21 @@ Design prototype (both styles, all states): https://claude.ai/artifact/7TqcLJwSL
 
 **State, highest priority first:** demo → joy (tap, level-up, 1–2 s) →
 waiting (a Claude Code session waits for you) → tired (any limit ≥ 90%) →
-working (5H rose in the last 10 min) → sleep (night by the sleep-schedule
+working (Claude acted in some session in the last 2 min) → sleep (night by the sleep-schedule
 hours) → bored (no work for 2+ local days) → sleep (no work for 2 h) → idle.
 Overlays on top: helmet during an air raid alert (replaces the hat), umbrella
 in rain (idle/waiting poses), scarf at ≤ 0 °C or snow; the window shows
 day/night/rain/snow and the room dims at night.
 
 **Rules.**
-- XP: +1 per 1% of the 5h window used (from rises in `fh_pct`; the first
-  payload after boot only sets the baseline), +10 for the first work of a
-  local day, +1 per tap (max 10 a day).
-- Level cost: `25 × level + 50` XP (Lv1→2 = 75, Lv9→10 = 275).
+- XP is the pet's — Claude's — own work, counted by the hooks: +3 for a
+  finished answer (Stop), +3 for a file edit (Edit/Write/MultiEdit/
+  NotebookEdit), +1 for any other successful tool call, 0 for failed calls
+  and for your prompts. Plus +25 for the first action of a local day and +1
+  per tap (max 10 a day). Limits no longer give XP.
+- Measured over two weeks of transcripts, a busy day is ~150 answers,
+  ~20 edits and ~850 other tool calls, so ~1300 XP.
+- Level cost: `150 × level + 150` XP (Lv1→2 = 300; Lv 10 ≈ a week, Lv 20 ≈ a month).
 - Rewards (permanent): beanie at Lv 3, party hat at Lv 5, crown at Lv 10,
   plant for a 7-day work streak, mug for 5 days started before 09:00,
   trophy for 7 days without 5H hitting 100% with work on at least 5 of them.
@@ -152,14 +170,27 @@ day/night/rain/snow and the room dims at night.
 - Progress is one NVS blob (`cyd` / `pet`), written at most every 5 min plus
   on level-ups and unlocks.
 
-**Waiting sessions.** `scripts/cyd_session_hook.sh` runs from hooks in
-`~/.claude/settings.json` (Stop, StopFailure, Notification → `waiting`;
-UserPromptSubmit, PostToolUse, PostToolUseFailure → `busy`; SessionEnd →
-`end`). It writes one file per session to `~/.claude/cyd-sessions/` — no
-network, always exits 0, synchronous so events can't land out of order. The
-bridge counts the `waiting` files (files untouched for 12 h are swept) and
-pushes the number within a second. The device drops it to 0 if the bridge
-goes quiet for 5 min.
+**Sessions and XP.** `scripts/cyd_session_hook.sh` runs from hooks in
+`~/.claude/settings.json`: Stop/StopFailure → `reply`; Notification
+`permission_prompt` → `permission`; Notification
+`elicitation_dialog|agent_needs_input` → `question`; UserPromptSubmit,
+PostToolUse, PostToolUseFailure → `busy`; SessionEnd → `end`. The kind comes
+from the matcher, not from the hook JSON. It writes one file per session to
+`~/.claude/cyd-sessions/` (`waiting <kind>` or `busy`) and appends one letter
+per action to `.xp` (`s` answer, `e` edit, `t` other tool). No network, always
+exits 0, synchronous so events can't land out of order.
+
+The bridge scans that directory every second (files untouched for 12 h are
+swept), claims `.xp` by renaming it, and pushes `waiting`/`wl`/`working`
+the moment they change and `xp_add` at most every 10 s. Chat titles come from
+the transcript: `customTitle` (after `/rename`), else `aiTitle`, else the
+project folder from `cwd`. The device drops `waiting` and `working` to 0 if the
+bridge goes quiet for 5 min.
+
+**Waiting ticker.** While any chat waits, the 7D row becomes a ticker: title
+(Cyrillic font, cut with "…"), "ждёт ответа / просит разрешение / задал вопрос ·
+N мин", a coloured dot (blue / orange / yellow) and "1/3"; it rotates every
+3 s. With nobody waiting the 7D limit is back.
 
 **Checking the art on the screen:**
 ```bash

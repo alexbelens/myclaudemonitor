@@ -5,7 +5,8 @@
  * does is driven by signals the device already has:
  *
  *   waiting sessions  -> waves, speech bubble   (bridge payload "waiting")
- *   5H going up       -> works at a laptop, XP  (bridge payload "fh_pct")
+ *   Claude acting     -> works at a laptop      (bridge payload "working")
+ *   Claude's actions  -> XP                     (bridge payload "xp_add")
  *   any limit >= 90%  -> tired, sweat
  *   night / idle 2h   -> sleeps
  *   no work 2 days    -> bored
@@ -43,18 +44,21 @@
 #define PET_SWEAT_COL  18
 #define PET_SWEAT_ROW  1
 
-/* ── Rules ── */
-#define PET_XP_PER_PCT      1u                          /* per 1% of the 5h window */
-#define PET_XP_DAILY        10u                         /* first work of the day */
+/* ── Rules ──
+ * XP is Claude's own work, counted by the session hooks and weighed by the
+ * bridge (+3 finished answer, +3 file edit, +1 any other tool call); the
+ * device only adds what arrives in "xp_add". */
+#define PET_XP_DAILY        25u                         /* first action of the day */
 #define PET_XP_PET          1u                          /* per tap ... */
 #define PET_PETS_PER_DAY    10u                         /* ... up to this many a day */
 #define PET_MAX_LEVEL       99u
-#define PET_WORKING_MS      (10UL * 60UL * 1000UL)      /* "working" after 5H last rose */
 #define PET_DOZE_MS         (2UL * 60UL * 60UL * 1000UL)/* dozes off after 2h without work */
 #define PET_WAITING_TTL_MS  (5UL * 60UL * 1000UL)       /* bridge silent this long -> 0 */
+                                                        /* (also for "working") */
 #define PET_SAVE_EVERY_MS   (5UL * 60UL * 1000UL)       /* NVS writes, at most */
 
-static uint32_t pet_level_cost(uint32_t level) { return 25u * level + 50u; }
+/* ~1300 XP on a busy day: Lv 10 in about a week, Lv 20 in about a month. */
+static uint32_t pet_level_cost(uint32_t level) { return 150u * level + 150u; }
 
 /* ── States ── */
 enum { PS_IDLE, PS_WORKING, PS_WAITING, PS_TIRED, PS_SLEEP, PS_BORED, PS_JOY, PS_COUNT };
@@ -105,9 +109,10 @@ static bool     pet_night         = false;
 static int      pet_wcode         = -1;
 static int      pet_temp_c        = 99;
 static bool     pet_tired         = false;
-static int      pet_prev_fh       = -1;     /* -1 until the first real payload */
-static uint32_t pet_last_work_ms  = 0;      /* 0 = no work seen since boot */
-static uint32_t pet_last_usage_ms = 0;      /* boot counts as "just seen" */
+static int      pet_working       = 0;      /* sessions where Claude acted in the last 2 min */
+static bool     pet_working_seen  = false;
+static uint32_t pet_working_ms    = 0;
+static uint32_t pet_last_usage_ms = 0;      /* last Claude action; boot counts as one */
 static uint32_t pet_joy_until     = 0;
 static int      pet_demo_state    = -1;
 static int      pet_demo_env      = -1;
@@ -306,19 +311,25 @@ static void pet_load_progress(const pet_progress_t *p) {
     if (pet_lv) pet_update_status();
 }
 
-/* Called with every payload that carried fh_pct. The first one after boot
- * only sets the baseline, so a reboot never pays out XP for old usage. */
+/* Limits only make the pet tired and reset the trophy clock; XP comes from
+ * Claude's actions (pet_add_activity), not from tokens spent. */
 static void pet_on_usage(int fh, int worst) {
     pet_tired = (worst >= 90);
-    if (pet_prev_fh >= 0 && fh > pet_prev_fh) {
-        uint32_t now = lv_tick_get();
-        pet_last_work_ms  = now ? now : 1;
-        pet_last_usage_ms = pet_last_work_ms;
-        pet_note_activity();
-        pet_add_xp((uint32_t)(fh - pet_prev_fh) * PET_XP_PER_PCT);
-    }
-    pet_prev_fh = fh;
     if (fh >= 100) pet_note_cap();
+}
+
+/* XP the bridge counted from the hooks since its last push. */
+static void pet_add_activity(int xp) {
+    if (xp <= 0) return;
+    pet_last_usage_ms = lv_tick_get();
+    pet_note_activity();
+    pet_add_xp((uint32_t)xp);
+}
+
+static void pet_set_working(int n) {
+    pet_working = n < 0 ? 0 : n;
+    pet_working_seen = true;
+    pet_working_ms = lv_tick_get();
 }
 
 static void pet_set_waiting(int n) {
@@ -378,7 +389,8 @@ static int pet_state_now(uint32_t now, uint8_t env) {
     if (now < pet_joy_until)                      return PS_JOY;
     if (pet_waiting_count(now) > 0)               return PS_WAITING;
     if (pet_tired)                                return PS_TIRED;
-    if (pet_last_work_ms && now - pet_last_work_ms < PET_WORKING_MS) return PS_WORKING;
+    if (pet_working_seen && pet_working > 0 && now - pet_working_ms <= PET_WAITING_TTL_MS)
+        return PS_WORKING;
     if (env & PEV_NIGHT)                          return PS_SLEEP;
     if (pet_bored())                              return PS_BORED;
     if (now - pet_last_usage_ms > PET_DOZE_MS)    return PS_SLEEP;
