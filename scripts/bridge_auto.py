@@ -439,24 +439,42 @@ def _fit(text: str, limit: int) -> str:
     return text
 
 
-def chat_info(sid: str) -> tuple[str, str]:
-    """(title, project folder) of a Claude Code session."""
+def _asks(blob: str) -> bool:
+    """Does Claude's last answer end on a question? A Stop only means "your
+    turn"; it's a question only if the final paragraph has a '?'."""
+    for line in reversed(blob.splitlines()):
+        if '"type":"assistant"' not in line:
+            continue
+        try:
+            content = json.loads(line).get("message", {}).get("content") or []
+        except ValueError:
+            continue
+        texts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+        if not texts:
+            continue                      # a tool call; the answer text is further up
+        last = texts[-1].strip().split("\n\n")[-1]
+        return "?" in last
+    return False
+
+
+def chat_info(sid: str) -> tuple[str, str, bool]:
+    """(title, project folder, last answer asks a question) of a session."""
     hits = glob.glob(str(Path.home() / ".claude" / "projects" / "*" / f"{sid}.jsonl"))
     if not hits:
-        return sid[:8], ""
+        return sid[:8], "", False
     path = hits[0]
     try:
         size = os.path.getsize(path)
     except OSError:
-        return sid[:8], ""
+        return sid[:8], "", False
     cached = _title_cache.get(sid)
     if cached and cached[0] == size:
-        return cached[1], cached[2]
+        return cached[1:]
     try:
         with open(path, encoding="utf-8", errors="ignore") as fh:
             blob = fh.read()
     except OSError:
-        return sid[:8], ""
+        return sid[:8], "", False
     # Where the chat was started: Claude may cd into subfolders later on.
     cwd = _last_value(blob, "cwd", first=True)
     # A chat started from ~ has no project; the home folder's name isn't one.
@@ -464,20 +482,30 @@ def chat_info(sid: str) -> tuple[str, str]:
     title = (_last_value(blob, "customTitle") or _last_value(blob, "aiTitle")
              or project or sid[:8])
     title, project = _fit(title, 70), _fit(project, 30)   # device: 72 + 32 bytes
-    _title_cache[sid] = (size, title, project)
-    return title, project
+    info = (title, project, _asks(blob))
+    _title_cache[sid] = (size,) + info
+    return info
 
 
 def chat_title(sid: str) -> str:
     return chat_info(sid)[0]
 
 
-def wait_list(waiting: list) -> str:
-    """'r|12|Монитор подвис|claude-monitor-cyd~p|6|...' — kind, minutes,
-    chat title, project folder."""
-    kinds = {"reply": "r", "permission": "p", "question": "q"}
-    return "~".join(f"{kinds.get(k, 'r')}|{int(age // 60)}|{'|'.join(chat_info(sid))}"
-                    for sid, k, age in waiting[:WAIT_LIST_MAX])
+def wait_entries(waiting: list) -> list:
+    """(kind, minutes, title, project) for the device. Kinds: r finished,
+    your turn / a finished on a question / p wants a permission / q a tool
+    asks for input."""
+    out = []
+    for sid, k, age in waiting[:WAIT_LIST_MAX]:
+        title, project, asks = chat_info(sid)
+        kind = {"permission": "p", "question": "q"}.get(k, "a" if asks else "r")
+        out.append((kind, int(age // 60), title, project))
+    return out
+
+
+def wait_list(entries: list) -> str:
+    """'r|12|CYD monitor|claude-monitor-cyd~p|6|...' — kind, minutes, title, project."""
+    return "~".join(f"{k}|{m}|{t}|{p}" for k, m, t, p in entries)
 
 
 def take_xp() -> int:
@@ -619,9 +647,10 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float, wifi_
             continue
 
         waiting, working = session_scan()
+        entries = wait_entries(waiting)
         pending_xp += take_xp()
         payload.update({"waiting": len(waiting), "working": working,
-                        "wl": wait_list(waiting), "xp_add": pending_xp})
+                        "wl": wait_list(entries), "xp_add": pending_xp})
 
         # Send
         ok = False
@@ -657,18 +686,19 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float, wifi_
         # Sleep until the next usage poll, but push the session counts the
         # moment they change (a waiting session is what people watch the
         # screen for; 60s late is too late), and Claude's XP every 10s.
-        last_key = ([w[:2] for w in waiting], working)
+        last_key = ([(e[0], e[2]) for e in entries], working)
         last_xp_push = time.time()
         deadline = time.time() + interval
         while time.time() < deadline:
             time.sleep(1)
             waiting, working = session_scan()
-            key = ([w[:2] for w in waiting], working)    # who waits and why, not for how long
+            entries = wait_entries(waiting)
+            key = ([(e[0], e[2]) for e in entries], working)   # who waits and why, not how long
             pending_xp += take_xp()
             xp_due = pending_xp > 0 and time.time() - last_xp_push >= XP_PUSH_SEC
             if (key != last_key or xp_due) and mode is not None:
                 data = {"waiting": len(waiting), "working": working,
-                        "wl": wait_list(waiting), "xp_add": pending_xp}
+                        "wl": wait_list(entries), "xp_add": pending_xp}
                 if send_partial(data, mode, ser, wifi_host):
                     last_key, pending_xp, last_xp_push = key, 0, time.time()
 

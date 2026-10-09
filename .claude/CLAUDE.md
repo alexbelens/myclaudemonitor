@@ -189,7 +189,9 @@ bridge goes quiet for 5 min.
 
 **Waiting ticker** shows the chat title in «quotes» (a chat named after its
 first message — "Монитор подвис" — otherwise reads like a device status) and
-"ждёт ответа N мин · project folder" under it; chats started from `~` show no
+"<what> N мин · project folder" under it, where <what> is "закончил" (a
+plain Stop: your turn), "спрашивает" (the answer's last paragraph has a '?',
+read from the transcript), "просит разрешение" or "ждёт ввода"; chats started from `~` show no
 project. A chat counts as waiting as soon as it waits
 (`WAIT_SHOW_SEC = 0` in the bridge; it scans every second, so ~1 s to the
 screen). A 60 s delay was tried to keep the chat you're typing into from

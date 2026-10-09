@@ -143,9 +143,11 @@ LV_FONT_DECLARE(cm_cyr_12)
 #endif
 
 /* Chats waiting for a reply, shown in the 7D row while there are any.
- * Bridge sends "wl": "r|12|Монитор подвис|claude-monitor-cyd~p|6|..." —
- * kind (r reply / p permission / q question), minutes, chat title, project
- * folder; oldest first. */
+ * Bridge sends "wl": "r|12|CYD monitor|claude-monitor-cyd~p|6|..." — kind,
+ * minutes, chat title, project folder; oldest first. Kinds: r finished (your
+ * turn), a finished on a question, p wants a permission, q a tool asks for
+ * input. A plain Stop is "finished", not "waiting for an answer": Claude
+ * hasn't necessarily asked anything. */
 #define WAIT_LIST_MAX 5
 typedef struct { char kind; int min; char title[72]; char project[32]; } wait_entry_t;
 static wait_entry_t g_wait[WAIT_LIST_MAX];
@@ -639,11 +641,13 @@ static void ui_update_wait(void) {
     if (g_wait_idx >= n) g_wait_idx = 0;
     const wait_entry_t *w = &g_wait[g_wait_idx];
     const char *what = w->kind == 'p' ? "просит разрешение"
-                     : w->kind == 'q' ? "задал вопрос" : "ждёт ответа";
+                     : w->kind == 'q' ? "ждёт ввода"
+                     : w->kind == 'a' ? "спрашивает" : "закончил";
     /* Line 2: what it wants, for how long, and from which project — the
      * project cut first if it doesn't fit. */
     char meta[112];
-    int m = snprintf(meta, sizeof(meta), "%s %d мин", what, w->min < 1 ? 1 : w->min);
+    int m = w->min < 1 ? snprintf(meta, sizeof(meta), "%s · только что", what)
+                       : snprintf(meta, sizeof(meta), "%s %d мин", what, w->min);
     if (w->project[0] && m > 0 && m < (int)sizeof(meta))
         snprintf(meta + m, sizeof(meta) - (size_t)m, " · %s", w->project);
     char pos[12];
@@ -656,7 +660,8 @@ static void ui_update_wait(void) {
     lv_label_set_text(tk_title, title);
     lv_label_set_text(tk_meta, meta);
     lv_label_set_text(tk_pos, pos);
-    lv_obj_set_style_bg_color(tk_dot, w->kind == 'p' ? CM_ORANGE : w->kind == 'q' ? CM_YELLOW : CM_ACCENT, 0);
+    lv_obj_set_style_bg_color(tk_dot, w->kind == 'p' ? CM_ORANGE
+                                    : (w->kind == 'q' || w->kind == 'a') ? CM_YELLOW : CM_ACCENT, 0);
 }
 
 static void wait_ticker_cb(lv_timer_t *t) {
