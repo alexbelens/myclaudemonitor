@@ -165,7 +165,7 @@ rack, wizard hat, black katana, guitar, vyshyvanka, robot, cat, sunflower,
 grimoire, wings, golden aura). One per slot is shown — the newest; long-press
 the pet to pick the hat. Taps give hearts, not XP.
 
-**Achievements** (15, medals on the room's shelf, grey until earned): first
+**Achievements** (15, a toast when earned and "★ N/15" in the status row): first
 answer, answer between 2–5 am, 5 days started before 9, three subagents at
 once, a limit at 100%, 100 answers a day, 7-day streak, a week without 5H at
 100%, 5 projects a day, 10 compactions, 100 taps, Saturday + Sunday, 1000

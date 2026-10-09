@@ -15,7 +15,7 @@
  *
  * Every level up to 30 unlocks a thing (src/pet_sprites.h, pet_items); one
  * thing per slot is shown — the newest — and long-press picks the hat.
- * Fifteen achievements hang as medals on a shelf in the room.
+ * Fifteen achievements, celebrated with a toast and counted in the status row.
  *
  * Mood comes from what the device already knows:
  *   waiting chats -> waves                5H >= 100% -> slumped, x x eyes, smoke
@@ -128,7 +128,6 @@ static int      pet_state_cur     = PS_IDLE;
 
 /* ── Objects ── */
 static lv_obj_t *pet_win, *pet_wall, *pet_decor, *pet_rack, *pet_laptop, *pet_pet;
-static lv_obj_t *pet_medal[ACH_COUNT];
 static lv_obj_t *pet_slot[SLOT_COUNT];      /* worn slots only: HEAD..HAND, AURA */
 static lv_obj_t *pet_body, *pet_umbrella, *pet_sweat, *pet_cloud, *pet_dim, *pet_toast, *pet_hit;
 static lv_obj_t *pet_lv, *pet_xpbar, *pet_xplbl, *pet_awards, *pet_coldlbl;
@@ -251,7 +250,6 @@ static void pet_toast_step(uint32_t now) {
  * Progress, levels, unlocks, achievements
  * ============================================================ */
 static void pet_update_status(void);
-static void pet_update_medals(void);
 
 static void pet_progress_defaults(void) {
     memset(&P, 0, sizeof(P));
@@ -278,7 +276,6 @@ static void pet_achieve(int a) {
     snprintf(buf, sizeof(buf), "Ачивка: %s", pet_achs[a].name);
     pet_toast_push(buf);
     pet_celebrate(2200);
-    pet_update_medals();
     pet_update_status();
     pet_save_now();
 }
@@ -389,7 +386,7 @@ static int pet_slot_item(int slot, int level, bool preview) {
 static void pet_load_progress(const pet_progress_t *p) {
     if (p && p->version == PET_PROGRESS_VERSION) P = *p;
     else pet_progress_defaults();
-    if (pet_lv) { pet_update_status(); pet_update_medals(); }
+    if (pet_lv) pet_update_status();
 }
 
 /* Counts the bridge de-duplicated from the hooks since its last push. */
@@ -581,12 +578,6 @@ static void pet_update_status(void) {
     lv_label_set_text(pet_xplbl, buf);
     snprintf(buf, sizeof(buf), "%d/%d", pet_popcount(P.achs), ACH_COUNT);
     lv_label_set_text(pet_awards, buf);
-}
-
-static void pet_update_medals(void) {
-    if (!pet_medal[0]) return;
-    for (int a = 0; a < ACH_COUNT; a++)
-        pet_src(pet_medal[a], (P.achs & (1UL << a)) ? pet_achs[a].medal : &pet_img_medal_locked);
 }
 
 /* ============================================================
@@ -847,13 +838,6 @@ static void pet_build(lv_obj_t *scr) {
     pet_win  = pet_image(scr, &pet_img_win_day, 14, 158, false);
     pet_wall = pet_image(scr, &pet_img_poster, 0, 0, true);
 
-    /* Medal shelf: every achievement has a slot, grey until it's earned */
-    for (int row = 0; row < 3; row++)
-        pet_rect(scr, 170, PET_ROOM_TOP + 19 + row * 18, 68, 2, 0x5E3B22);
-    for (int a = 0; a < ACH_COUNT; a++)
-        pet_medal[a] = pet_image(scr, &pet_img_medal_locked,
-                                 172 + (a % 5) * 13, PET_ROOM_TOP + 3 + (a / 5) * 18, false);
-
     pet_coldlbl = lv_label_create(scr);                                         /* "ждут: N" */
     lv_label_set_text(pet_coldlbl, "");
     lv_obj_set_style_text_font(pet_coldlbl, CM_FONT_CYR_12, 0);
@@ -948,7 +932,6 @@ static void pet_build(lv_obj_t *scr) {
     lv_obj_set_pos(pet_awards, 210, 275);
 
     pet_update_status();
-    pet_update_medals();
     pet_render(lv_tick_get());
     lv_timer_create(pet_tick_cb, 50, NULL);
 }
