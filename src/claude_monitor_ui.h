@@ -41,6 +41,9 @@ typedef struct {
 static claude_data_t g_data = {
     0, 300, 0, 10080, 0, "Pro", 0, 10080, "", 0,
 };
+/* True once a payload carrying fh_pct has arrived: the pet must take its XP
+ * baseline from real data, never from the boot-time defaults above. */
+static bool g_usage_seen = false;
 
 /* ============================================================
  * SHARED STATE (read/written by main.cpp)
@@ -125,14 +128,6 @@ static lv_obj_t *lbl_weather_temp;
 static lv_obj_t *lbl_weather_cond;
 static lv_obj_t *lbl_alert;
 static lv_obj_t *accent_bar;
-/* Claude Code mascot (lives inside the ring) — built from obj rectangles */
-static lv_obj_t *mascot_cont;   /* transparent container (bobs up/down) */
-static lv_obj_t *mascot_head;
-static lv_obj_t *mascot_eye_l;
-static lv_obj_t *mascot_eye_r;
-static lv_obj_t *mascot_sweat;  /* stress drop, hidden until critical */
-static bool g_mascot_blink    = false;  /* true while eyes closed */
-static bool g_mascot_critical = false;  /* true when the hottest limit >= 90% */
 
 /* Three limits, equal weight, fixed order: 5H, 7D, per-model weekly */
 #define LIMIT_COUNT 3
@@ -173,49 +168,6 @@ static lv_color_t warning_bar_color(int pct) {
     if (pct >= 75) return CM_ORANGE;
     if (pct >= 50) return CM_YELLOW;
     return CM_ACCENT;
-}
-
-/* ── Claude Code mascot — eye geometry (relative to container) ──
- * Eyes keep a fixed vertical center; only their height changes:
- * open (idle) / blink (closed line) / squint (tense, when 5H >= 90%). */
-/* Sprite is an 18x5 subpixel grid; each cell is SW x SH px on screen. */
-#define MASCOT_SW           5
-#define MASCOT_SH           9
-#define MASCOT_EYE_W        MASCOT_SW
-#define MASCOT_EYE_X_L      (5 * MASCOT_SW)    /* col 5  */
-#define MASCOT_EYE_X_R      (12 * MASCOT_SW)   /* col 12 */
-#define MASCOT_EYE_Y_OPEN   (1 * MASCOT_SH)    /* row 1  */
-#define MASCOT_EYE_H_OPEN   MASCOT_SH
-#define MASCOT_EYE_H_SQUINT 3
-#define MASCOT_EYE_H_BLINK  2
-#define MASCOT_Y            222   /* inside the hero ring */
-
-static void mascot_set_eyes(int h) {
-    int y = MASCOT_EYE_Y_OPEN + (MASCOT_EYE_H_OPEN - h) / 2;  /* keep center fixed */
-    lv_obj_set_height(mascot_eye_l, h); lv_obj_set_y(mascot_eye_l, y);
-    lv_obj_set_height(mascot_eye_r, h); lv_obj_set_y(mascot_eye_r, y);
-}
-
-/* Apply current state: critical (squint + sweat, no blink) vs idle (blink). */
-static void mascot_apply(void) {
-    if (!mascot_eye_l) return;
-    if (g_mascot_critical) {
-        mascot_set_eyes(MASCOT_EYE_H_SQUINT);
-        lv_obj_remove_flag(mascot_sweat, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        mascot_set_eyes(g_mascot_blink ? MASCOT_EYE_H_BLINK : MASCOT_EYE_H_OPEN);
-        lv_obj_add_flag(mascot_sweat, LV_OBJ_FLAG_HIDDEN);
-    }
-}
-
-static void mascot_blink_cb(lv_timer_t *t) {
-    if (g_mascot_critical) {          /* tense: hold squint, don't blink */
-        lv_timer_set_period(t, 700);
-        return;
-    }
-    g_mascot_blink = !g_mascot_blink;
-    mascot_apply();
-    lv_timer_set_period(t, g_mascot_blink ? 140 : 3600);  /* short closed, long open */
 }
 
 static void fmt_time(int minutes, char *buf, size_t len) {
@@ -280,6 +232,9 @@ static void jstr(const char *j, const char *k, char *o, size_t l, const char *d)
     v++; size_t i=0; while (*v && *v!='"' && i<l-1) o[i++]=*v++; o[i]='\0';
 }
 
+/* The pet uses g_alert_state, the CM_* palette and the fonts above. */
+#include "claude_pet.h"
+
 /* ============================================================
  * DATA LOADING
  * ============================================================ */
@@ -294,6 +249,12 @@ static void load_data_from_json(const char *buf) {
     g_data.sc_reset_min = jint(buf, "sc_reset_min",  g_data.sc_reset_min);
     g_data.active_win   = jint(buf, "active_win",    g_data.active_win);
     jstr(buf, "sc_name", g_data.sc_name, sizeof(g_data.sc_name), g_data.sc_name);
+
+    /* Claude Code sessions waiting for a reply (bridge, from the session
+     * hooks). The bridge also sends this field alone the moment it changes,
+     * so it's the field's presence that refreshes it, not its value. */
+    if (jfind(buf, "waiting")) pet_set_waiting(jint(buf, "waiting", 0));
+    if (jfind(buf, "fh_pct"))  g_usage_seen = true;
 }
 
 #ifndef ESP32
@@ -617,6 +578,7 @@ static void update_ui(void) {
         if (!shown) continue;
 
         lv_label_set_text(lim_title[i], nm[i]);
+        lv_obj_align_to(lim_reset[i], lim_title[i], LV_ALIGN_OUT_RIGHT_MID, 8, 1);
         snprintf(tmp, sizeof(tmp), "%d%%", (int)pc[i]);
         lv_label_set_text(lim_pct[i], tmp);
         lv_bar_set_value(lim_bar[i], pc[i], LV_ANIM_ON);
@@ -628,44 +590,25 @@ static void update_ui(void) {
         lv_label_set_text(lim_reset[i], tmp);
     }
 
-    /* Mascot reacts to the hottest limit, whichever that is */
+    /* The pet earns XP from 5H growth and tires at the hottest limit. */
     int32_t worst = pc[0];
     for (int i = 1; i < LIMIT_COUNT; i++) {
         if ((i < 2 || has_scoped) && pc[i] > worst) worst = pc[i];
     }
-    g_mascot_critical = (worst >= 90);
-    mascot_apply();
-}
-
-/* Solid filled rounded block — used to build the mascot from primitives */
-static lv_obj_t* make_block(lv_obj_t *parent, lv_color_t color,
-                            int x, int y, int w, int h, int radius) {
-    lv_obj_t *o = lv_obj_create(parent);
-    lv_obj_set_size(o, w, h);
-    lv_obj_set_pos(o, x, y);
-    lv_obj_set_style_bg_color(o, color, 0);
-    lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(o, 0, 0);
-    lv_obj_set_style_radius(o, radius, 0);
-    lv_obj_set_style_pad_all(o, 0, 0);
-    lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scrollbar_mode(o, LV_SCROLLBAR_MODE_OFF);
-    return o;
+    if (g_usage_seen) pet_on_usage((int)g_data.fh_pct, (int)worst);
 }
 
 /* ============================================================
  * BUILD: MONITOR SCREEN
  *
  *  y=  0.. 70  Header: clock / date  |  temp / cond
- *  y= 70.. 73  Alert stripe (air-raid, pending API token)
- *  y= 74..118  5H zone: label+% / bar / remain (ticking)
- *  y=124       Divider
- *  y=125..169  7D zone: label+% / bar / remain
- *  y=175       Divider
- *  y=176..204  Per-model weekly cap (Fable/Opus); hidden if the plan has none
- *  y=226..271  Claude Code mascot (18x5 sprite: body + arms + eyes + legs)
- *  A soft panel slides behind whichever of the three is currently binding.
- *  y=272       Divider
+ *  y= 70.. 73  Alert stripe (air raid)
+ *  y= 80..103  5H row:  name, time left, %  /  thin bar
+ *  y=107..130  7D row
+ *  y=134..157  Per-model weekly cap (Fable/Opus); hidden if the plan has none
+ *  y=162       Divider
+ *  y=163..268  Pet room: window, items, Claude (claude_pet.h)
+ *  y=270..292  Pet status: level, XP, rewards
  *  y=296       Tab bar
  * ============================================================ */
 static void build_monitor_screen(lv_obj_t *scr) {
@@ -750,75 +693,36 @@ static void build_monitor_screen(lv_obj_t *scr) {
     lv_obj_set_style_radius(accent_bar, 0, 0);
     lv_obj_set_scrollbar_mode(accent_bar, LV_SCROLLBAR_MODE_OFF);
 
-    /* ── Three limit blocks (y=76 / 134 / 192), same size, fixed order.
-     *    Each: name on the left, big number on the right, full-width bar,
-     *    and the time until it resets. ── */
+    /* ── Three limit rows (y=80 / 107 / 134), fixed order. Each: name, time
+     *    to reset right after it, percentage on the right, a thin bar under.
+     *    Kept compact so the pet's room gets the space below. ── */
     for (int i = 0; i < LIMIT_COUNT; i++) {
-        int y = 76 + i * 50;
+        int y = 80 + i * 27;
 
         lim_title[i] = make_label(scr, "--", &lv_font_montserrat_14, CM_TEXT_SEC, 8, y);
 
         lim_pct[i] = lv_label_create(scr);
         lv_label_set_text(lim_pct[i], "0%");
-        lv_obj_set_style_text_font(lim_pct[i], &lv_font_montserrat_22, 0);
+        lv_obj_set_style_text_font(lim_pct[i], &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(lim_pct[i], CM_TEXT_PRIM, 0);
-        lv_obj_set_pos(lim_pct[i], 110, y - 3);
-        lv_obj_set_width(lim_pct[i], 122);
+        lv_obj_set_pos(lim_pct[i], 150, y - 1);
+        lv_obj_set_width(lim_pct[i], 82);
         lv_obj_set_style_text_align(lim_pct[i], LV_TEXT_ALIGN_RIGHT, 0);
 
-        lim_bar[i] = make_bar(scr, CM_ACCENT, 8, y + 24, 224, 14);
+        lim_bar[i] = make_bar(scr, CM_ACCENT, 8, y + 17, 224, 6);
+        lv_obj_set_style_radius(lim_bar[i], 3, LV_PART_MAIN);
+        lv_obj_set_style_radius(lim_bar[i], 3, LV_PART_INDICATOR);
 
         lim_reset[i] = lv_label_create(scr);
         lv_label_set_text(lim_reset[i], "");
-        lv_obj_set_style_text_font(lim_reset[i], &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_font(lim_reset[i], &lv_font_montserrat_12, 0);
         lv_obj_set_style_text_color(lim_reset[i], CM_TEXT_DIM, 0);
-        lv_obj_set_pos(lim_reset[i], 62, y + 1);
-        lv_obj_set_width(lim_reset[i], 120);
-        lv_obj_set_style_text_align(lim_reset[i], LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_set_pos(lim_reset[i], 36, y + 1);
     }
+    make_divider(scr, 162, CM_DIVIDER);
 
-    /* ── Claude Code mascot (centered, container bobs gently) ──
-     * Reproduces the real CLI banner sprite (18x5 subpixel grid):
-     *      ############        head (rounded)
-     *      ##.######.##        two small eyes near the edges
-     *    ################      middle row is wider (little arms)
-     *      ############        lower body
-     *       # #    # #         four legs in two pairs
-     * Body/arms/legs are terracotta blocks; eyes are black blocks on top. */
-    mascot_cont = lv_obj_create(scr);
-    lv_obj_set_size(mascot_cont, 18 * MASCOT_SW, 5 * MASCOT_SH);  /* 72x30 */
-    lv_obj_set_pos(mascot_cont, (240 - 18 * MASCOT_SW) / 2, MASCOT_Y);
-    lv_obj_set_style_bg_opa(mascot_cont, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(mascot_cont, 0, 0);
-    lv_obj_set_style_radius(mascot_cont, 0, 0);
-    lv_obj_set_style_pad_all(mascot_cont, 0, 0);
-    lv_obj_remove_flag(mascot_cont, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scrollbar_mode(mascot_cont, LV_SCROLLBAR_MODE_OFF);
-
-    /* body: rows 0..3, cols 3..14 (rounded head) */
-    make_block(mascot_cont, CM_CLAUDE, 3 * MASCOT_SW, 0,
-               12 * MASCOT_SW, 4 * MASCOT_SH, 6);
-    /* arms: row 2 sticks out two cols on each side */
-    make_block(mascot_cont, CM_CLAUDE, 1 * MASCOT_SW, 2 * MASCOT_SH,
-               2 * MASCOT_SW, MASCOT_SH, 2);
-    make_block(mascot_cont, CM_CLAUDE, 15 * MASCOT_SW, 2 * MASCOT_SH,
-               2 * MASCOT_SW, MASCOT_SH, 2);
-    /* legs: row 4, cols 4 & 6 (left pair), 11 & 13 (right pair) */
-    make_block(mascot_cont, CM_CLAUDE,  4 * MASCOT_SW, 4 * MASCOT_SH, MASCOT_SW, MASCOT_SH, 2);
-    make_block(mascot_cont, CM_CLAUDE,  6 * MASCOT_SW, 4 * MASCOT_SH, MASCOT_SW, MASCOT_SH, 2);
-    make_block(mascot_cont, CM_CLAUDE, 11 * MASCOT_SW, 4 * MASCOT_SH, MASCOT_SW, MASCOT_SH, 2);
-    make_block(mascot_cont, CM_CLAUDE, 13 * MASCOT_SW, 4 * MASCOT_SH, MASCOT_SW, MASCOT_SH, 2);
-    /* eyes (black blocks on top of the body, row 1) */
-    mascot_eye_l = make_block(mascot_cont, CM_CLAUDE_EYE,
-        MASCOT_EYE_X_L, MASCOT_EYE_Y_OPEN, MASCOT_EYE_W, MASCOT_EYE_H_OPEN, 1);
-    mascot_eye_r = make_block(mascot_cont, CM_CLAUDE_EYE,
-        MASCOT_EYE_X_R, MASCOT_EYE_Y_OPEN, MASCOT_EYE_W, MASCOT_EYE_H_OPEN, 1);
-    /* stress drop (top-right), shown only when 5H >= 90% */
-    mascot_sweat = make_block(mascot_cont, CM_SWEAT, 15 * MASCOT_SW, MASCOT_SH / 2,
-               MASCOT_SW, MASCOT_SH, 2);
-    lv_obj_add_flag(mascot_sweat, LV_OBJ_FLAG_HIDDEN);
-
-    make_divider(scr, 272, CM_DIVIDER);
+    /* ── The pet's room and status row (claude_pet.h) ── */
+    pet_build(scr);
 
     create_tab_bar(scr, 0);
 }
@@ -1015,20 +919,6 @@ static void claude_monitor_create_ui(void) {
     update_tz_display();
     update_sleep_ui();
 
-    /* Mascot: blink loop + gentle idle bob (2px up/down) */
-    mascot_apply();
-    lv_timer_create(mascot_blink_cb, 3600, NULL);
-
-    lv_anim_t bob;
-    lv_anim_init(&bob);
-    lv_anim_set_var(&bob, mascot_cont);
-    lv_anim_set_exec_cb(&bob, (lv_anim_exec_xcb_t)lv_obj_set_y);
-    lv_anim_set_values(&bob, MASCOT_Y, MASCOT_Y - 3);
-    lv_anim_set_duration(&bob, 1400);
-    lv_anim_set_playback_duration(&bob, 1400);
-    lv_anim_set_repeat_count(&bob, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_set_path_cb(&bob, lv_anim_path_ease_in_out);
-    lv_anim_start(&bob);
 
 #ifndef ESP32
     lv_timer_create(data_poll_cb, 2000, NULL);

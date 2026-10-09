@@ -309,6 +309,7 @@ def build_payload(usage: dict, plan_name: str) -> dict:
         "active_win":    usage["active_win"],
         "warning_level": warning,
         "plan_name":     plan_name or "Claude",
+        "waiting":       count_waiting(),
     }
 
 
@@ -363,6 +364,47 @@ def send_wifi(payload: dict, host: str) -> bool:
             return r.status == 200
     except Exception:
         return False
+
+
+# ── Claude Code sessions waiting for a reply ─────────────────────────────────
+# scripts/cyd_session_hook.sh keeps one file per session in this directory,
+# holding "waiting" or "busy". A session killed without SessionEnd leaves its
+# file behind, so anything untouched for 12h is ignored and swept away.
+SESSIONS_DIR      = Path.home() / ".claude" / "cyd-sessions"
+SESSION_STALE_SEC = 12 * 3600
+
+
+def count_waiting() -> int:
+    try:
+        entries = list(SESSIONS_DIR.iterdir())
+    except OSError:
+        return 0
+    now, n = time.time(), 0
+    for f in entries:
+        if f.name.endswith(".tmp"):
+            continue
+        try:
+            if now - f.stat().st_mtime > SESSION_STALE_SEC:
+                f.unlink(missing_ok=True)
+                continue
+            if f.read_text().strip() == "waiting":
+                n += 1
+        except OSError:
+            continue
+    return n
+
+
+def send_partial(data: dict, mode: str, ser, host: str) -> bool:
+    """Push a few fields without a usage fetch; the device keeps the rest."""
+    if mode == "wifi":
+        return send_wifi(data, host)
+    if mode == "serial" and ser:
+        try:
+            ser.write((json.dumps(data, separators=(",", ":")) + "\n").encode("utf-8"))
+            return True
+        except Exception:
+            return False
+    return False
 
 
 def find_serial_port(hint: str) -> str:
@@ -498,11 +540,22 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float, wifi_
                 f"5H:{payload['fh_pct']}%({payload['fh_reset_min']}m)  "
                 f"7D:{payload['sd_pct']}%({payload['sd_reset_min']}m)  "
                 + (f"{payload['sc_name']}:{payload['sc_pct']}%  " if payload['sc_name'] else "")
+                + (f"waiting:{payload['waiting']}  " if payload['waiting'] else "")
                 + f"[{status}]  ",
                 end="", flush=True,
             )
 
-        time.sleep(interval)
+        # Sleep until the next usage poll, but push the waiting count the
+        # moment a session starts or stops waiting: that's the signal people
+        # watch the screen for, and 60s late is too late.
+        last_waiting = payload["waiting"]
+        deadline = time.time() + interval
+        while time.time() < deadline:
+            time.sleep(1)
+            n = count_waiting()
+            if n != last_waiting and mode is not None:
+                if send_partial({"waiting": n}, mode, ser, wifi_host):
+                    last_waiting = n
 
 
 def main():

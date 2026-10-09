@@ -117,7 +117,7 @@
 #define LV_USE_BAR 1                   /* Progress bars */
 #define LV_USE_OBJ 1                   /* Containers, dividers, status LED */
 #define LV_USE_LINE 0
-#define LV_USE_IMAGE 0
+#define LV_USE_IMAGE 1                 /* Pet sprites: RGB565A8 straight from flash */
 #define LV_USE_IMG 0
 
 /* Extra widgets - all disabled to save flash */

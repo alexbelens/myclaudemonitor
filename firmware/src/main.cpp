@@ -255,6 +255,7 @@ static void fetch_weather(void) {
         char out[64];
         snprintf(out, sizeof(out), "%s %+d\xC2\xB0" "C", wmo_condition(wcode), itemp);
         Serial.printf("[Weather] temp=%.1f code=%d -> '%s'\n", temp, wcode, out);
+        pet_set_weather(wcode, itemp);
         strncpy(g_weather_str, out, sizeof(g_weather_str) - 1);
         update_weather_display(g_weather_str);
     } else {
@@ -414,6 +415,33 @@ static void save_dev_to_nvs(void) {
     prefs.end();
 }
 
+/* Night by the sleep-schedule hours, whether or not the backlight schedule
+ * is switched on — the pet goes to bed either way. Never blocks on NTP. */
+static bool is_night_now(void);
+
+/* ============================================================
+ * Pet progress — one NVS blob; claude_pet.h owns the format
+ * ============================================================ */
+static void save_pet_to_nvs(const pet_progress_t *p) {
+    Preferences prefs;
+    prefs.begin("cyd", false);
+    prefs.putBytes("pet", p, sizeof(*p));
+    prefs.end();
+}
+
+static void load_pet_from_nvs(void) {
+    pet_progress_t p;
+    memset(&p, 0, sizeof(p));
+    Preferences prefs;
+    prefs.begin("cyd", true);
+    size_t n = prefs.getBytes("pet", &p, sizeof(p));
+    prefs.end();
+    pet_load_progress(n == sizeof(p) ? &p : NULL);
+    pet_save_cb = save_pet_to_nvs;
+    Serial.printf("[Pet] Lv %u, %u XP, rewards 0x%02X, streak %u\n",
+                  (unsigned)P.level, (unsigned)P.xp, (unsigned)P.unlocked, (unsigned)P.streak);
+}
+
 static void load_sleep_from_nvs(void) {
     Preferences prefs;
     prefs.begin("cyd", true);
@@ -430,6 +458,14 @@ static void save_sleep_to_nvs(void) {
     prefs.putInt("sleep_h",   g_sleep_hour);
     prefs.putInt("wake_h",    g_wake_hour);
     prefs.end();
+}
+
+static bool is_night_now(void) {
+    struct tm ti;
+    if (!getLocalTime(&ti, 10)) return false;
+    int h = ti.tm_hour;
+    if (g_sleep_hour < g_wake_hour) return h >= g_sleep_hour && h < g_wake_hour;
+    return h >= g_sleep_hour || h < g_wake_hour;
 }
 
 /* ============================================================
@@ -492,15 +528,39 @@ static void http_handle_monitor(void) {
 }
 
 static void http_handle_status(void) {
-    char resp[224];
+    lv_mem_monitor_t mon;
+    lv_mem_monitor(&mon);
+    char resp[448];
     snprintf(resp, sizeof(resp),
         "{\"ok\":true,\"version\":\"4.0\",\"ip\":\"%s\","
-        "\"alert\":\"%s\",\"alert_uid\":%d,\"has_token\":%s}",
+        "\"alert\":\"%s\",\"alert_uid\":%d,\"has_token\":%s,"
+        "\"pet\":\"%s\",\"level\":%u,\"xp\":%u,\"xp_next\":%u,\"rewards\":%u,"
+        "\"streak\":%u,\"waiting\":%d,"
+        "\"heap_free\":%u,\"lv_free\":%u,\"lv_used_pct\":%u,\"lv_frag_pct\":%u}",
         WiFi.localIP().toString().c_str(),
         alert_state_name(g_alert_state),
         g_alert_uid,
-        g_alert_token[0] ? "true" : "false");
+        g_alert_token[0] ? "true" : "false",
+        pet_state_name(), (unsigned)P.level, (unsigned)P.xp,
+        (unsigned)pet_level_cost(P.level), (unsigned)P.unlocked,
+        (unsigned)P.streak, pet_waiting_count(lv_tick_get()),
+        (unsigned)ESP.getFreeHeap(), (unsigned)mon.free_size,
+        (unsigned)mon.used_pct, (unsigned)mon.frag_pct);
     http_server.send(200, "application/json", resp);
+}
+
+/* Show a pet state/environment for a few seconds, to check the art on the
+ * real screen:  POST /api/pet {"state":"waiting","env":"rain","sec":20}
+ * Needs Content-Type: application/json — WebServer drops a form-encoded body
+ * whose single field has no '=', so a bare `curl -d '{...}'` arrives empty. */
+static void http_handle_pet(void) {
+    String body = http_server.hasArg("plain") ? http_server.arg("plain") : "";
+    char st[16] = {0}, env[16] = {0};
+    jstr(body.c_str(), "state", st, sizeof(st), "");
+    jstr(body.c_str(), "env",   env, sizeof(env), "");
+    int sec = jint(body.c_str(), "sec", 20);
+    pet_demo(st[0] ? st : NULL, env[0] ? env : NULL, sec);
+    http_server.send(200, "application/json", "{\"ok\":true}");
 }
 
 /* Set the alerts.in.ua token and region UID without reflashing. The token is
@@ -756,6 +816,7 @@ static void wifi_setup(void) {
     http_server.on("/api/monitor", HTTP_POST, http_handle_monitor);
     http_server.on("/api/status",  HTTP_GET,  http_handle_status);
     http_server.on("/api/config",  HTTP_POST, http_handle_config);
+    http_server.on("/api/pet",     HTTP_POST, http_handle_pet);
     http_server.onNotFound(http_handle_not_found);
     http_server.begin();
     Serial.println("[HTTP] Server on port 80");
@@ -852,6 +913,7 @@ void setup() {
     load_dev_from_nvs();
     load_sleep_from_nvs();
     claude_monitor_create_ui();
+    load_pet_from_nvs();
     Serial.println("[OK] UI created");
 
     wifi_setup();
@@ -961,6 +1023,13 @@ void loop() {
                 digitalWrite(LCD_BL, g_is_sleeping ? LOW : HIGH);
             }
         }
+    }
+
+    /* Pet: refresh "night" once a minute */
+    static unsigned long last_pet_night_ms = 0;
+    if (last_pet_night_ms == 0 || now_ms - last_pet_night_ms >= 60000UL) {
+        last_pet_night_ms = now_ms ? now_ms : 1;
+        pet_set_night(is_night_now());
     }
 
     /* AP portal button from Settings */
