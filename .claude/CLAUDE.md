@@ -199,7 +199,9 @@ showing after every answer, and dropped: seeing a wait at once matters more.
 While any chat waits, the 7D row becomes a ticker: title
 (Cyrillic font, cut with "…"), "ждёт ответа / просит разрешение / задал вопрос ·
 N мин", a coloured dot (blue / orange / yellow) and "1/3"; it rotates every
-3 s. With nobody waiting the 7D limit is back.
+3 s. The 7D limit itself is the last slide of
+the cycle (each waiting chat, then 7D, 3 s apiece), so an idle open session
+can't hide 7D for hours; with nobody waiting 7D just stays.
 
 **Checking the art on the screen:**
 ```bash

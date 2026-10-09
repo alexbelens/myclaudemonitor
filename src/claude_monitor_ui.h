@@ -289,7 +289,7 @@ static void parse_wait_list(const char *s) {
         if (!*end) break;
         s = end + 1;
     }
-    if (g_wait_idx >= g_wait_n) g_wait_idx = 0;
+    if (g_wait_idx > g_wait_n) g_wait_idx = 0;   /* index g_wait_n is the 7D slide */
 }
 
 /* ============================================================
@@ -622,23 +622,28 @@ static void update_wifi_ui(void) {
 /* ============================================================
  * UPDATE: MONITOR DATA (called when bridge sends payload)
  * ============================================================ */
-/* While a chat waits for you, the 7D row turns into a ticker: one chat at a
- * time, rotating every 3 s. With nobody waiting the 7D limit is back. */
+/* The 7D row is a slideshow while chats wait: each waiting chat, then the 7D
+ * limit itself, 3 s apiece — a chat sitting idle in an open session would
+ * otherwise hide 7D for hours. With nobody waiting 7D just stays. */
+static int wait_slides(void) {
+    return pet_waiting_count(lv_tick_get()) > 0 ? g_wait_n : 0;
+}
+
 static void ui_update_wait(void) {
     if (!tk_title) return;
     int total = pet_waiting_count(lv_tick_get());
-    int n = total > 0 ? g_wait_n : 0;
-    bool on = n > 0;
+    int n = wait_slides();
+    if (g_wait_idx > n) g_wait_idx = 0;
+    bool chat = n > 0 && g_wait_idx < n;          /* slide n is 7D */
 
     lv_obj_t *row7d[] = { lim_title[1], lim_pct[1], lim_bar[1], lim_reset[1] };
-    for (unsigned k = 0; k < sizeof(row7d) / sizeof(row7d[0]); k++) pet_show(row7d[k], !on);
-    pet_show(tk_dot, on);
-    pet_show(tk_title, on);
-    pet_show(tk_meta, on);
-    pet_show(tk_pos, on && total > 1);
-    if (!on) return;
+    for (unsigned k = 0; k < sizeof(row7d) / sizeof(row7d[0]); k++) pet_show(row7d[k], !chat);
+    pet_show(tk_dot, chat);
+    pet_show(tk_title, chat);
+    pet_show(tk_meta, chat);
+    pet_show(tk_pos, chat && total > 1);
+    if (!chat) return;
 
-    if (g_wait_idx >= n) g_wait_idx = 0;
     const wait_entry_t *w = &g_wait[g_wait_idx];
     const char *what = w->kind == 'p' ? "просит разрешение"
                      : w->kind == 'q' ? "ждёт ввода"
@@ -666,8 +671,9 @@ static void ui_update_wait(void) {
 
 static void wait_ticker_cb(lv_timer_t *t) {
     (void)t;
-    if (g_wait_n > 1) g_wait_idx = (g_wait_idx + 1) % g_wait_n;
-    ui_update_wait();      /* also hides the ticker once the waiting count expires */
+    int n = wait_slides();
+    g_wait_idx = n > 0 ? (g_wait_idx + 1) % (n + 1) : 0;    /* chats..., then 7D */
+    ui_update_wait();      /* also brings 7D back once the waiting count expires */
 }
 
 static void update_ui(void) {
