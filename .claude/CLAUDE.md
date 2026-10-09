@@ -172,8 +172,8 @@ once, a limit at 100%, 100 answers a day, 7-day streak, a week without 5H at
 answers, 5 chats waiting at once, 100 replies to permissions/questions.
 
 **State, highest priority first:** demo → joy (tap, level-up, achievement,
-5H reset) → waiting (a chat waits for you) → exhausted (5H 100%: slumped, x x
-eyes, smoke) → working (Claude acted in the last 2 min) → tired (5H ≥ 75%,
+5H reset) → working (Claude acted in the last 2 min) → waiting (a fresh chat waits for
+you) → exhausted (5H 100%: slumped, x x eyes, smoke) → tired (5H ≥ 75%,
 sweat from 90%) → sleep (night by the sleep-schedule hours) → bored (3 days
 without Claude: sits under a rain cloud) → sleep (2 h idle) → idle (yawns now
 and then from 5H 50%). Overlays: helmet during an air raid alert (replaces the
@@ -204,11 +204,15 @@ swept), claims `.xp` by renaming it, de-duplicates, and pushes
 (after `/rename`), else `aiTitle`, else the project folder. The device drops
 `waiting`/`working` to 0 if the bridge goes quiet for 5 min.
 
-**Dismissing.** Opening a chat and leaving it fires no hook, so a chat you've
-seen stays "waiting" until you write to it. Tap the ticker row on the device to
-hide the chat shown ("seen, not now"): each wait has its own id (CRC32 of
-session + the moment it began waiting), so it comes back once that chat waits
-again. Dismissals live in RAM (last 8) and also stop the pet waving for them.
+**Cooling.** Opening a chat and leaving it fires no hook, so a chat you've
+seen would otherwise stay "waiting" until you write to it. After 5 minutes
+(`WAIT_COOL_SEC` in the bridge) a wait cools: it leaves the ticker and the pet
+stops waving for it; a quiet "ждут: N" under the room's window keeps count. A
+tap on the ticker hides the chat shown right away (each wait has its own id,
+CRC32 of session + when it began, so it returns once that chat waits again).
+
+The pet's working (at the laptop) outranks waiting (waving): the ticker
+already lists who waits, and an idle chat shouldn't hide that Claude is busy.
 
 **Waiting ticker** shows the chat title in «quotes» (a chat named after its
 first message — "Монитор подвис" — otherwise reads like a device status) and

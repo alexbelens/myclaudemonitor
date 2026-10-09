@@ -374,6 +374,9 @@ def send_wifi(payload: dict, host: str) -> bool:
 SESSIONS_DIR      = Path.home() / ".claude" / "cyd-sessions"
 SESSION_STALE_SEC = 12 * 3600
 WORKING_SEC       = 120     # a "busy" session touched this recently is working
+WAIT_COOL_SEC     = 5 * 60  # after this a wait "cools": off the ticker, no waving,
+                            # just a count — opening a chat fires no hook, so a
+                            # chat you've seen and left would otherwise stay up
 WAIT_SHOW_SEC     = 0       # a chat counts as waiting right away: seeing it at
                             # once matters more than the chat you're typing into
                             # showing up after every answer
@@ -496,6 +499,12 @@ def chat_info(sid: str) -> tuple[str, str, bool]:
 
 def chat_title(sid: str) -> str:
     return chat_info(sid)[0]
+
+
+def split_waits(waiting: list) -> tuple[list, int]:
+    """Fresh waits (shown, waved at) and how many have cooled."""
+    fresh = [w for w in waiting if w[2] < WAIT_COOL_SEC]
+    return fresh, len(waiting) - len(fresh)
 
 
 def wait_entries(waiting: list) -> list:
@@ -704,9 +713,11 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float, wifi_
             continue
 
         waiting, working = session_scan()
-        entries = wait_entries(waiting)
+        fresh, cold = split_waits(waiting)
+        entries = wait_entries(fresh)
         take_events(pend)
-        payload.update({"waiting": len(waiting), "working": working, "wl": wait_list(entries)})
+        payload.update({"waiting": len(fresh), "cold": cold, "working": working,
+                        "wl": wait_list(entries)})
         payload.update(pending_fields(pend))
 
         # Send
@@ -743,18 +754,20 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float, wifi_
         # Sleep until the next usage poll, but push the session counts the
         # moment they change (a waiting session is what people watch the
         # screen for; 60s late is too late), and Claude's XP every 10s.
-        last_key = ([(e[0], e[1], e[3]) for e in entries], working)
+        last_key = ([(e[0], e[1], e[3]) for e in entries], cold, working)
         last_xp_push = time.time()
         deadline = time.time() + interval
         while time.time() < deadline:
             time.sleep(1)
             waiting, working = session_scan()
-            entries = wait_entries(waiting)
-            key = ([(e[0], e[1], e[3]) for e in entries], working)   # who waits and why, not how long
+            fresh, cold = split_waits(waiting)
+            entries = wait_entries(fresh)
+            key = ([(e[0], e[1], e[3]) for e in entries], cold, working)   # who waits and why, not how long
             take_events(pend)
             xp_due = pending_any(pend) and time.time() - last_xp_push >= XP_PUSH_SEC
             if (key != last_key or xp_due) and mode is not None:
-                data = {"waiting": len(waiting), "working": working, "wl": wait_list(entries)}
+                data = {"waiting": len(fresh), "cold": cold, "working": working,
+                        "wl": wait_list(entries)}
                 data.update(pending_fields(pend))
                 if send_partial(data, mode, ser, wifi_host):
                     last_key, pend, last_xp_push = key, new_pending(), time.time()

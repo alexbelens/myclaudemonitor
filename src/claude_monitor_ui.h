@@ -333,7 +333,10 @@ static void load_data_from_json(const char *buf) {
         jstr(buf, "wl", wl, sizeof(wl), "");
         dismissed = parse_wait_list(wl);
     }
-    /* Waits you've dismissed don't make the pet wave either. */
+    /* Waits older than 5 min arrive as a bare count ("cold"), before
+     * "waiting" so the juggler achievement sees both. Dismissed waits don't
+     * make the pet wave either. */
+    if (jfind(buf, "cold"))    pet_set_cold(jint(buf, "cold", 0));
     if (jfind(buf, "waiting")) pet_set_waiting(jint(buf, "waiting", 0) - dismissed);
     if (jfind(buf, "working")) pet_set_working(jint(buf, "working", 0));
     /* Claude's actions since the bridge's last push, already de-duplicated:

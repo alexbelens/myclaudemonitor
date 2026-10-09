@@ -108,6 +108,7 @@ static uint32_t pet_last_save_ms = 0;
 static int      pet_waiting       = 0;
 static bool     pet_waiting_seen  = false;
 static uint32_t pet_waiting_ms    = 0;
+static int      pet_cold          = 0;      /* waits older than 5 min: just counted */
 static int      pet_working       = 0;
 static bool     pet_working_seen  = false;
 static uint32_t pet_working_ms    = 0;
@@ -130,7 +131,8 @@ static lv_obj_t *pet_win, *pet_wall, *pet_decor, *pet_rack, *pet_laptop, *pet_pe
 static lv_obj_t *pet_medal[ACH_COUNT];
 static lv_obj_t *pet_slot[SLOT_COUNT];      /* worn slots only: HEAD..HAND, AURA */
 static lv_obj_t *pet_body, *pet_umbrella, *pet_sweat, *pet_cloud, *pet_dim, *pet_toast, *pet_hit;
-static lv_obj_t *pet_lv, *pet_xpbar, *pet_xplbl, *pet_awards;
+static lv_obj_t *pet_lv, *pet_xpbar, *pet_xplbl, *pet_awards, *pet_coldlbl;
+static int       pet_cold_shown = -1;
 static int       pet_bx, pet_by, pet_bw;    /* last body box, for hearts */
 static uint32_t  pet_next_yawn = 15000;
 
@@ -444,11 +446,12 @@ static void pet_on_usage(int fh, int worst) {
     if (fh >= 100) pet_note_cap();
 }
 
+static void pet_set_cold(int n) { pet_cold = n < 0 ? 0 : n; }
 static void pet_set_waiting(int n) {
     pet_waiting = n < 0 ? 0 : n;
     pet_waiting_seen = true;
     pet_waiting_ms = lv_tick_get();
-    if (pet_waiting >= 5) pet_achieve(ACH_JUGGLER);
+    if (pet_waiting + pet_cold >= 5) pet_achieve(ACH_JUGGLER);
 }
 static void pet_set_working(int n) {
     pet_working = n < 0 ? 0 : n;
@@ -506,10 +509,12 @@ static uint8_t pet_env(uint32_t now) {
 static int pet_state_now(uint32_t now, uint8_t env) {
     if (now < pet_demo_until && pet_demo_state >= 0) return pet_demo_state;
     if (now < pet_joy_until)                      return PS_JOY;
-    if (pet_waiting_count(now) > 0)               return PS_WAITING;
-    if (pet_fh >= 100)                            return PS_EXHAUSTED;
+    /* Working outranks waiting: the ticker already lists who waits, and a
+     * chat idling somewhere shouldn't hide that Claude is busy elsewhere. */
     if (pet_working_seen && pet_working > 0 && now - pet_working_ms <= PET_WAITING_TTL_MS)
         return PS_WORKING;
+    if (pet_waiting_count(now) > 0)               return PS_WAITING;
+    if (pet_fh >= 100)                            return PS_EXHAUSTED;
     if (pet_fh >= 75)                             return PS_TIRED;
     if (env & PEV_NIGHT)                          return PS_SLEEP;
     if (pet_bored())                              return PS_BORED;
@@ -814,6 +819,18 @@ static void pet_render(uint32_t now) {
     pet_step_particles(pet_parts, PET_PARTS, now, dt);
     pet_step_particles(pet_zs, PET_ZS, now, dt);
 
+    /* Cooled waits: a quiet count under the window */
+    int cold = (pet_waiting_seen && now - pet_waiting_ms <= PET_WAITING_TTL_MS) ? pet_cold : 0;
+    if (cold != pet_cold_shown) {
+        pet_cold_shown = cold;
+        pet_show(pet_coldlbl, cold > 0);
+        if (cold > 0) {
+            char buf[24];
+            snprintf(buf, sizeof(buf), "ждут: %d", cold);
+            lv_label_set_text(pet_coldlbl, buf);
+        }
+    }
+
     pet_toast_step(now);
     if (pet_dirty && now - pet_last_save_ms > PET_SAVE_EVERY_MS) pet_save_now();
 }
@@ -836,6 +853,13 @@ static void pet_build(lv_obj_t *scr) {
     for (int a = 0; a < ACH_COUNT; a++)
         pet_medal[a] = pet_image(scr, &pet_img_medal_locked,
                                  172 + (a % 5) * 13, PET_ROOM_TOP + 3 + (a / 5) * 18, false);
+
+    pet_coldlbl = lv_label_create(scr);                                         /* "ждут: N" */
+    lv_label_set_text(pet_coldlbl, "");
+    lv_obj_set_style_text_font(pet_coldlbl, CM_FONT_CYR_12, 0);
+    lv_obj_set_style_text_color(pet_coldlbl, CM_YELLOW, 0);
+    lv_obj_set_pos(pet_coldlbl, 14, 194);
+    lv_obj_add_flag(pet_coldlbl, LV_OBJ_FLAG_HIDDEN);
 
     pet_rect(scr, 0, PET_FLOOR, 240, 12, 0x11112E);                            /* floor */
     pet_rect(scr, 0, PET_FLOOR, 240, 1, 0x1D1D46);
