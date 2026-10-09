@@ -75,7 +75,7 @@ Bridge sends JSON payload every 30s:
   "warning_level": 1,     // 0=ok 1=50% 2=75% 3=90%
   "plan_name":     "Pro",
   "waiting":       1,     // Claude Code sessions waiting for you
-  "wl":            "r|12|Монитор подвис",  // up to 5: kind (r/p/q)|minutes|title
+  "wl":            "r|12|Монитор подвис|claude-monitor-cyd",  // up to 5: kind (r/p/q)|minutes|title|project
   "working":       1,     // sessions where Claude acted in the last 2 min
   "xp_add":        42     // Claude's actions since the last push (a delta)
 }
@@ -187,7 +187,10 @@ the transcript: `customTitle` (after `/rename`), else `aiTitle`, else the
 project folder from `cwd`. The device drops `waiting` and `working` to 0 if the
 bridge goes quiet for 5 min.
 
-**Waiting ticker.** A chat counts as waiting only after it has waited 60 s
+**Waiting ticker** shows the chat title in «quotes» (a chat named after its
+first message — "Монитор подвис" — otherwise reads like a device status) and
+"ждёт ответа N мин · project folder" under it; chats started from `~` show no
+project. A chat counts as waiting only after it has waited 60 s
 (`WAIT_SHOW_SEC` in the bridge), so the chat you're typing into doesn't flash
 on the screen after every answer; the pet's waving follows the same rule.
 While any chat waits, the 7D row becomes a ticker: title

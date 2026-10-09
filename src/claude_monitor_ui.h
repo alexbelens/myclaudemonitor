@@ -143,10 +143,11 @@ LV_FONT_DECLARE(cm_cyr_12)
 #endif
 
 /* Chats waiting for a reply, shown in the 7D row while there are any.
- * Bridge sends "wl": "r|12|Монитор подвис~p|6|Релиз киоска" — kind
- * (r reply / p permission / q question), minutes, title; oldest first. */
+ * Bridge sends "wl": "r|12|Монитор подвис|claude-monitor-cyd~p|6|..." —
+ * kind (r reply / p permission / q question), minutes, chat title, project
+ * folder; oldest first. */
 #define WAIT_LIST_MAX 5
-typedef struct { char kind; int min; char title[72]; } wait_entry_t;
+typedef struct { char kind; int min; char title[72]; char project[32]; } wait_entry_t;
 static wait_entry_t g_wait[WAIT_LIST_MAX];
 static int g_wait_n   = 0;
 static int g_wait_idx = 0;
@@ -271,12 +272,19 @@ static void parse_wait_list(const char *s) {
         if (!p) break;
         p++;
         const char *end = strchr(p, '~');
-        size_t len = end ? (size_t)(end - p) : strlen(p);
+        if (!end) end = p + strlen(p);
+        const char *bar = (const char *)memchr(p, '|', (size_t)(end - p));   /* title|project */
+        const char *tend = bar ? bar : end;
+        size_t len = (size_t)(tend - p);
         if (len >= sizeof(w->title)) len = sizeof(w->title) - 1;   /* bridge keeps it under */
         memcpy(w->title, p, len);
         w->title[len] = '\0';
+        len = bar ? (size_t)(end - bar - 1) : 0;
+        if (len >= sizeof(w->project)) len = sizeof(w->project) - 1;
+        if (bar) memcpy(w->project, bar + 1, len);
+        w->project[len] = '\0';
         g_wait_n++;
-        if (!end) break;
+        if (!*end) break;
         s = end + 1;
     }
     if (g_wait_idx >= g_wait_n) g_wait_idx = 0;
@@ -632,13 +640,20 @@ static void ui_update_wait(void) {
     const wait_entry_t *w = &g_wait[g_wait_idx];
     const char *what = w->kind == 'p' ? "просит разрешение"
                      : w->kind == 'q' ? "задал вопрос" : "ждёт ответа";
-    char meta[64];
-    if (w->min < 1) snprintf(meta, sizeof(meta), "%s · только что", what);
-    else            snprintf(meta, sizeof(meta), "%s · %d мин", what, w->min);
+    /* Line 2: what it wants, for how long, and from which project — the
+     * project cut first if it doesn't fit. */
+    char meta[112];
+    int m = snprintf(meta, sizeof(meta), "%s %d мин", what, w->min < 1 ? 1 : w->min);
+    if (w->project[0] && m > 0 && m < (int)sizeof(meta))
+        snprintf(meta + m, sizeof(meta) - (size_t)m, " · %s", w->project);
     char pos[12];
     snprintf(pos, sizeof(pos), "%d/%d", g_wait_idx + 1, total);
+    /* Quoted, so a chat named like a complaint ("Монитор подвис") reads as a
+     * chat name, not as a status message from the device. */
+    char title[80];
+    snprintf(title, sizeof(title), "«%s»", w->title);
 
-    lv_label_set_text(tk_title, w->title);
+    lv_label_set_text(tk_title, title);
     lv_label_set_text(tk_meta, meta);
     lv_label_set_text(tk_pos, pos);
     lv_obj_set_style_bg_color(tk_dot, w->kind == 'p' ? CM_ORANGE : w->kind == 'q' ? CM_YELLOW : CM_ACCENT, 0);

@@ -431,37 +431,51 @@ def _last_value(blob: str, key: str) -> str:
         return ""
 
 
-def chat_title(sid: str) -> str:
+def _fit(text: str, limit: int) -> str:
+    """Clean for the wire and cut to the device buffer without splitting a letter."""
+    text = " ".join(text.translate(_TITLE_BAD).split())
+    while len(text.encode("utf-8")) > limit:
+        text = text[:-1]
+    return text
+
+
+def chat_info(sid: str) -> tuple[str, str]:
+    """(title, project folder) of a Claude Code session."""
     hits = glob.glob(str(Path.home() / ".claude" / "projects" / "*" / f"{sid}.jsonl"))
     if not hits:
-        return sid[:8]
+        return sid[:8], ""
     path = hits[0]
     try:
         size = os.path.getsize(path)
     except OSError:
-        return sid[:8]
+        return sid[:8], ""
     cached = _title_cache.get(sid)
     if cached and cached[0] == size:
-        return cached[1]
+        return cached[1], cached[2]
     try:
         with open(path, encoding="utf-8", errors="ignore") as fh:
             blob = fh.read()
     except OSError:
-        return sid[:8]
+        return sid[:8], ""
+    cwd = _last_value(blob, "cwd")
+    # A chat started from ~ has no project; the home folder's name isn't one.
+    project = "" if os.path.normpath(cwd) == str(Path.home()) else os.path.basename(cwd)
     title = (_last_value(blob, "customTitle") or _last_value(blob, "aiTitle")
-             or os.path.basename(_last_value(blob, "cwd")) or sid[:8])
-    title = " ".join(title.translate(_TITLE_BAD).split())
-    # Keep it under the device's 72-byte buffer without splitting a letter.
-    while len(title.encode("utf-8")) > 70:
-        title = title[:-1]
-    _title_cache[sid] = (size, title)
-    return title
+             or project or sid[:8])
+    title, project = _fit(title, 70), _fit(project, 30)   # device: 72 + 32 bytes
+    _title_cache[sid] = (size, title, project)
+    return title, project
+
+
+def chat_title(sid: str) -> str:
+    return chat_info(sid)[0]
 
 
 def wait_list(waiting: list) -> str:
-    """'r|12|Монитор подвис~p|6|Релиз киоска' — kind, minutes, title."""
+    """'r|12|Монитор подвис|claude-monitor-cyd~p|6|...' — kind, minutes,
+    chat title, project folder."""
     kinds = {"reply": "r", "permission": "p", "question": "q"}
-    return "~".join(f"{kinds.get(k, 'r')}|{int(age // 60)}|{chat_title(sid)}"
+    return "~".join(f"{kinds.get(k, 'r')}|{int(age // 60)}|{'|'.join(chat_info(sid))}"
                     for sid, k, age in waiting[:WAIT_LIST_MAX])
 
 
