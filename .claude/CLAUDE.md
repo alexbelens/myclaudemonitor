@@ -190,9 +190,10 @@ bridge goes quiet for 5 min.
 **Waiting ticker** shows the chat title in «quotes» (a chat named after its
 first message — "Монитор подвис" — otherwise reads like a device status) and
 "ждёт ответа N мин · project folder" under it; chats started from `~` show no
-project. A chat counts as waiting only after it has waited 60 s
-(`WAIT_SHOW_SEC` in the bridge), so the chat you're typing into doesn't flash
-on the screen after every answer; the pet's waving follows the same rule.
+project. A chat counts as waiting as soon as it waits
+(`WAIT_SHOW_SEC = 0` in the bridge; it scans every second, so ~1 s to the
+screen). A 60 s delay was tried to keep the chat you're typing into from
+showing after every answer, and dropped: seeing a wait at once matters more.
 While any chat waits, the 7D row becomes a ticker: title
 (Cyrillic font, cut with "…"), "ждёт ответа / просит разрешение / задал вопрос ·
 N мин", a coloured dot (blue / orange / yellow) and "1/3"; it rotates every
