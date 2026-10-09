@@ -149,11 +149,21 @@ LV_FONT_DECLARE(cm_cyr_12)
  * input. A plain Stop is "finished", not "waiting for an answer": Claude
  * hasn't necessarily asked anything. */
 #define WAIT_LIST_MAX 5
-typedef struct { char kind; int min; char title[72]; char project[32]; } wait_entry_t;
+typedef struct { uint32_t id; char kind; int min; char title[72]; char project[32]; } wait_entry_t;
 static wait_entry_t g_wait[WAIT_LIST_MAX];
 static int g_wait_n   = 0;
 static int g_wait_idx = 0;
-static lv_obj_t *tk_dot, *tk_title, *tk_meta, *tk_pos;
+static lv_obj_t *tk_dot, *tk_title, *tk_meta, *tk_pos, *tk_hit;
+
+/* Waits you dismissed by tapping the ticker ("seen, not now"). Each wait has
+ * its own id, so a chat comes back when it starts waiting again. RAM only. */
+#define WAIT_DISMISS_MAX 8
+static uint32_t g_dismissed[WAIT_DISMISS_MAX];
+static int      g_dismissed_n = 0;
+static bool wait_dismissed(uint32_t id) {
+    for (int i = 0; i < g_dismissed_n; i++) if (g_dismissed[i] == id) return true;
+    return false;
+}
 
 /* Three limits, equal weight, fixed order: 5H, 7D, per-model weekly */
 #define SHOW_SCOPED_LIMIT 0     /* per-model cap row; needs a layout slot if turned on */
@@ -262,12 +272,17 @@ static void jstr(const char *j, const char *k, char *o, size_t l, const char *d)
 /* The pet uses g_alert_state, the CM_* palette and the fonts above. */
 #include "claude_pet.h"
 
-static void parse_wait_list(const char *s) {
+/* Returns how many listed waits were skipped as dismissed. */
+static int parse_wait_list(const char *s) {
+    int skipped = 0;
     g_wait_n = 0;
     while (*s && g_wait_n < WAIT_LIST_MAX) {
         wait_entry_t *w = &g_wait[g_wait_n];
-        w->kind = *s;
+        w->id = (uint32_t)strtoul(s, NULL, 16);
         const char *p = strchr(s, '|');
+        if (!p) break;
+        w->kind = p[1];
+        p = strchr(p + 1, '|');
         if (!p) break;
         w->min = atoi(p + 1);
         p = strchr(p + 1, '|');
@@ -285,11 +300,13 @@ static void parse_wait_list(const char *s) {
         if (len >= sizeof(w->project)) len = sizeof(w->project) - 1;
         if (bar) memcpy(w->project, bar + 1, len);
         w->project[len] = '\0';
-        g_wait_n++;
+        if (wait_dismissed(w->id)) skipped++;
+        else g_wait_n++;
         if (!*end) break;
         s = end + 1;
     }
     if (g_wait_idx > g_wait_n) g_wait_idx = 0;   /* index g_wait_n is the 7D slide */
+    return skipped;
 }
 
 /* ============================================================
@@ -310,12 +327,14 @@ static void load_data_from_json(const char *buf) {
     /* Claude Code sessions waiting for a reply (bridge, from the session
      * hooks). The bridge also sends this field alone the moment it changes,
      * so it's the field's presence that refreshes it, not its value. */
-    if (jfind(buf, "waiting")) pet_set_waiting(jint(buf, "waiting", 0));
+    int dismissed = 0;
     if (jfind(buf, "wl")) {
-        char wl[WAIT_LIST_MAX * 80];
+        char wl[WAIT_LIST_MAX * 96];
         jstr(buf, "wl", wl, sizeof(wl), "");
-        parse_wait_list(wl);
+        dismissed = parse_wait_list(wl);
     }
+    /* Waits you've dismissed don't make the pet wave either. */
+    if (jfind(buf, "waiting")) pet_set_waiting(jint(buf, "waiting", 0) - dismissed);
     if (jfind(buf, "working")) pet_set_working(jint(buf, "working", 0));
     /* Claude's actions since the bridge's last push, already de-duplicated:
      * answers, your replies to permissions/questions, subagents, compactions. */
@@ -650,6 +669,7 @@ static void ui_update_wait(void) {
     pet_show(tk_title, chat);
     pet_show(tk_meta, chat);
     pet_show(tk_pos, chat && total > 1);
+    pet_show(tk_hit, chat);
     if (!chat) return;
 
     const wait_entry_t *w = &g_wait[g_wait_idx];
@@ -675,6 +695,23 @@ static void ui_update_wait(void) {
     lv_label_set_text(tk_pos, pos);
     lv_obj_set_style_bg_color(tk_dot, w->kind == 'p' ? CM_ORANGE
                                     : (w->kind == 'q' || w->kind == 'a') ? CM_YELLOW : CM_ACCENT, 0);
+}
+
+/* Tap on the ticker: "seen it, not now" — hide this wait until it changes. */
+static void wait_dismiss_cb(lv_event_t *e) {
+    (void)e;
+    if (g_wait_idx >= g_wait_n) return;                 /* the 7D slide is showing */
+    uint32_t id = g_wait[g_wait_idx].id;
+    if (g_dismissed_n == WAIT_DISMISS_MAX) {            /* forget the oldest */
+        memmove(g_dismissed, g_dismissed + 1, sizeof(g_dismissed[0]) * (WAIT_DISMISS_MAX - 1));
+        g_dismissed_n--;
+    }
+    g_dismissed[g_dismissed_n++] = id;
+    memmove(&g_wait[g_wait_idx], &g_wait[g_wait_idx + 1], sizeof(g_wait[0]) * (size_t)(g_wait_n - g_wait_idx - 1));
+    g_wait_n--;
+    pet_set_waiting(pet_waiting > 0 ? pet_waiting - 1 : 0);
+    pet_toast_push("Скрыл до нового ответа");
+    ui_update_wait();
 }
 
 static void wait_ticker_cb(lv_timer_t *t) {
@@ -869,7 +906,15 @@ static void build_monitor_screen(lv_obj_t *scr) {
     tk_meta = make_label(scr, "", CM_FONT_CYR_12, CM_TEXT_SEC, 20, 124);
     lv_obj_set_width(tk_meta, 212);
     lv_label_set_long_mode(tk_meta, LV_LABEL_LONG_DOT);
-    lv_obj_t *tk_parts[] = { tk_dot, tk_title, tk_pos, tk_meta };
+    /* Tap target over the whole row: tapping a shown chat dismisses it */
+    tk_hit = lv_obj_create(scr);
+    lv_obj_set_pos(tk_hit, 0, 100);
+    lv_obj_set_size(tk_hit, 240, 44);
+    lv_obj_set_style_bg_opa(tk_hit, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(tk_hit, 0, 0);
+    lv_obj_remove_flag(tk_hit, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(tk_hit, wait_dismiss_cb, LV_EVENT_SHORT_CLICKED, NULL);
+    lv_obj_t *tk_parts[] = { tk_dot, tk_title, tk_pos, tk_meta, tk_hit };
     for (unsigned k = 0; k < sizeof(tk_parts) / sizeof(tk_parts[0]); k++)
         lv_obj_add_flag(tk_parts[k], LV_OBJ_FLAG_HIDDEN);
 

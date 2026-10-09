@@ -175,22 +175,23 @@ WIZARD = ["...........PPP..",
 HELMET = ["....HHHHHHHH....", "..HHHHHHHHHHHH..", ".HHHHHHHHHHHHHH.", "HHHHHHHHHHHHHHHH",
           "hhhhhhhhhhhhhhhh"]
 
-GLASSES = [".KKKK..KKKK.",
-           "KK..KKKK..KK",
-           ".K..K..K..K.",
-           ".K..K..K..K.",
-           ".KKKK..KKKK."]
-SUNGLASSES = [".KKKK..KKKK.",
-              "KKKKKKKKKKKK",
-              ".KwKK..KwKK.",
-              ".KKKK..KKKK."]
-HEADPHONES = ["...KKKKKKKKKKKK...",
-              "..K............K..",
-              "..K............K..",
-              ".KKK..........KKK.",
-              ".KSK..........KSK.",
-              ".KKK..........KKK."]
-SCARF = ["RRWRRRWRRRWRRR", "RRWRRRWRRRWRRR", "..........RR..", "..........WR..", "..........RR.."]
+# The head is only 5 cells tall with eyes in rows 2-4, so face things must be
+# thin: full rings plus black headphone cups turned his face into one mask.
+GLASSES = ["IIII..IIII",              # silver half-rims: black ones merged with his eyes
+           "I..IIII..I",
+           "I..I..I..I"]
+SUNGLASSES = ["KKKKKKKKKK",           # lenses right where the eyes are
+              "KwKK..KwKK",
+              ".KK....KK."]
+HEADPHONES = [".....XXXXXXXXXX.....",  # cups sit outside the head
+              "....X..........X....",
+              "...X............X...",
+              ".KK..............KK.",
+              ".KR..............RK.",
+              ".KK..............KK."]
+SCARF = ["rRRRRRRRRRRRRr",           # one band and a short tail
+         "..........RR..",
+         "..........rR.."]
 HOODIE = ["XXXXXWXXWXXXXX",
           "XXXXXWXXWXXXXX",
           "XXXSSSSSSSSXXX",
@@ -577,16 +578,16 @@ ROOM_SLOTS = ("PET", "DECOR", "WALL", "RACK")
 ITEMS = [
     ("cap",         2, "HEAD",  "кепка",               [CAP],            (4, -3), 0),
     ("duck",        3, "PET",   "резиновая уточка",    DUCK,             None, 0),
-    ("glasses",     4, "FACE",  "очки",                [GLASSES],        (5, 1), 0),
+    ("glasses",     4, "FACE",  "очки",                [GLASSES],        (6, 1), 0),
     ("beanie",      5, "HEAD",  "шапка",               [BEANIE],         (4, -5), 0),
-    ("headphones",  6, "EARS",  "наушники",            [HEADPHONES],     (2, -2), 0),
+    ("headphones",  6, "EARS",  "наушники",            [HEADPHONES],     (1, -2), 0),
     ("poster",      7, "WALL",  "постер </>",          [poster()],       None, 0),
     ("scarf",       8, "NECK",  "шарф",                [SCARF],          (4, 5), 0),
     ("party",       9, "HEAD",  "колпак",              [PARTY],          (6, -8), 0),
     ("crown",      10, "HEAD",  "корона",              [CROWN],          (5, -5), 0),
     ("crab",       11, "PET",   "краб",                CRAB,             None, 0),
     ("cloak",      12, "BACK",  "плащ",                [CLOAK],          (2, 1), 22),
-    ("shades",     13, "FACE",  "тёмные очки",         [SUNGLASSES],     (5, 1), 0),
+    ("shades",     13, "FACE",  "тёмные очки",         [SUNGLASSES],     (6, 2), 0),
     ("mug",        14, "HAND",  "кружка кофе",         [MUG],            (6, 5), 0),
     ("hoodie",     15, "SHIRT", "худи",                [HOODIE],         (4, 5), 0),
     ("hachimaki",  16, "HEAD",  "хатимаки",            [HACHIMAKI],      (1, 1), 0),

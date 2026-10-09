@@ -204,6 +204,12 @@ swept), claims `.xp` by renaming it, de-duplicates, and pushes
 (after `/rename`), else `aiTitle`, else the project folder. The device drops
 `waiting`/`working` to 0 if the bridge goes quiet for 5 min.
 
+**Dismissing.** Opening a chat and leaving it fires no hook, so a chat you've
+seen stays "waiting" until you write to it. Tap the ticker row on the device to
+hide the chat shown ("seen, not now"): each wait has its own id (CRC32 of
+session + the moment it began waiting), so it comes back once that chat waits
+again. Dismissals live in RAM (last 8) and also stop the pet waving for them.
+
 **Waiting ticker** shows the chat title in «quotes» (a chat named after its
 first message — "Монитор подвис" — otherwise reads like a device status) and
 "<what> N мин · project folder" under it, where <what> is "закончил" (a

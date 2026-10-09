@@ -391,8 +391,9 @@ AGENT_STALE_SEC = 30 * 60   # a lost SubagentStop shouldn't count an agent forev
 
 
 def session_scan() -> tuple[list, int]:
-    """Waiting sessions as (sid, kind, age_sec), oldest wait first, and the
-    number of sessions where Claude acted in the last WORKING_SEC."""
+    """Waiting sessions as (sid, kind, age_sec, since), oldest wait first, and
+    the number of sessions where Claude acted in the last WORKING_SEC.
+    `since` is when this wait began (the state file's mtime)."""
     try:
         entries = list(SESSIONS_DIR.iterdir())
     except OSError:
@@ -402,7 +403,8 @@ def session_scan() -> tuple[list, int]:
         if f.name.startswith(".") or f.name.endswith(".tmp"):
             continue
         try:
-            age = now - f.stat().st_mtime
+            mtime = f.stat().st_mtime
+            age = now - mtime
             if age > SESSION_STALE_SEC:
                 f.unlink(missing_ok=True)
                 continue
@@ -410,7 +412,7 @@ def session_scan() -> tuple[list, int]:
         except OSError:
             continue
         if words and words[0] == "waiting" and age >= WAIT_SHOW_SEC:
-            waiting.append((f.name, words[1] if len(words) > 1 else "reply", age))
+            waiting.append((f.name, words[1] if len(words) > 1 else "reply", age, int(mtime)))
         elif words and words[0] == "busy" and age <= WORKING_SEC:
             working += 1
     waiting.sort(key=lambda w: -w[2])
@@ -501,16 +503,20 @@ def wait_entries(waiting: list) -> list:
     your turn / a finished on a question / p wants a permission / q a tool
     asks for input."""
     out = []
-    for sid, k, age in waiting[:WAIT_LIST_MAX]:
+    for sid, k, age, since in waiting[:WAIT_LIST_MAX]:
         title, project, asks = chat_info(sid)
         kind = {"permission": "p", "question": "q"}.get(k, "a" if asks else "r")
-        out.append((kind, int(age // 60), title, project))
+        # One id per wait, not per chat: hiding it on the device lasts until
+        # this chat starts waiting again.
+        wid = f"{zlib.crc32(f'{sid}:{since}'.encode()) & 0xffffffff:08x}"
+        out.append((wid, kind, int(age // 60), title, project))
     return out
 
 
 def wait_list(entries: list) -> str:
-    """'r|12|CYD monitor|claude-monitor-cyd~p|6|...' — kind, minutes, title, project."""
-    return "~".join(f"{k}|{m}|{t}|{p}" for k, m, t, p in entries)
+    """'1a2b3c4d|r|12|CYD monitor|claude-monitor-cyd~...' — wait id, kind,
+    minutes, title, project."""
+    return "~".join("|".join(str(x) for x in e) for e in entries)
 
 
 _last_event: dict = {}        # session -> its last XP event, for de-duplication
@@ -737,14 +743,14 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float, wifi_
         # Sleep until the next usage poll, but push the session counts the
         # moment they change (a waiting session is what people watch the
         # screen for; 60s late is too late), and Claude's XP every 10s.
-        last_key = ([(e[0], e[2]) for e in entries], working)
+        last_key = ([(e[0], e[1], e[3]) for e in entries], working)
         last_xp_push = time.time()
         deadline = time.time() + interval
         while time.time() < deadline:
             time.sleep(1)
             waiting, working = session_scan()
             entries = wait_entries(waiting)
-            key = ([(e[0], e[2]) for e in entries], working)   # who waits and why, not how long
+            key = ([(e[0], e[1], e[3]) for e in entries], working)   # who waits and why, not how long
             take_events(pend)
             xp_due = pending_any(pend) and time.time() - last_xp_push >= XP_PUSH_SEC
             if (key != last_key or xp_due) and mode is not None:
