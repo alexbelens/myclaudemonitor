@@ -31,6 +31,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 import zlib
 import glob
@@ -660,6 +661,7 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float, wifi_
 
     plan_name = plan or source_plan
     pend = new_pending()        # events claimed from the log, not yet delivered
+    usage_wait_until = 0.0      # don't ask for limits before this (429 back-off)
 
     while True:
         now = time.time()
@@ -694,23 +696,37 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float, wifi_
                     time.sleep(5)
                     continue
 
-        # Fetch usage
-        try:
-            usage   = oauth_usage() if use_oauth else session_usage(session_key, org_uuid)
-            payload = build_payload(usage, plan_name)
-        except TokenUnavailableError as ex:
-            # Transient: Claude Code refreshes the token on its own.
-            print(f"\r[TOKEN] {ex} — retrying in 60s  ", end="", flush=True)
-            time.sleep(60)
-            continue
-        except SessionExpiredError:
-            print("\r[SESSION EXPIRED] Get new sessionKey from claude.ai → update plist → restart bridge  ")
-            time.sleep(300)  # check again in 5 min, not every 30s
-            continue
-        except Exception as ex:
-            print(f"\r[ERR]  usage fetch: {ex}  ", end="", flush=True)
-            time.sleep(interval)
-            continue
+        # Fetch usage. A failure here must not hold back the rest: waiting
+        # chats, "working" and XP still go out, and the screen keeps the last
+        # limits it got. Until 2026-10 an expired subscription meant ~40 h of
+        # 429s during which nothing reached the device at all.
+        payload, usage_note = {}, ""
+        if time.time() >= usage_wait_until:
+            try:
+                usage   = oauth_usage() if use_oauth else session_usage(session_key, org_uuid)
+                payload = build_payload(usage, plan_name)
+                usage_wait_until = 0.0
+            except TokenUnavailableError as ex:
+                # Transient: Claude Code refreshes the token on its own.
+                usage_note, usage_wait_until = f"[TOKEN] {ex}", time.time() + 60
+            except SessionExpiredError:
+                usage_note = "[SESSION EXPIRED] Get new sessionKey from claude.ai → update plist → restart bridge"
+                usage_wait_until = time.time() + 300
+            except urllib.error.HTTPError as ex:
+                # 429 says how long to stay away (Retry-After); polling anyway
+                # every minute only keeps the limit in force.
+                wait = interval
+                if ex.code == 429:
+                    try:
+                        wait = max(interval, min(3600, int(ex.headers.get("retry-after") or 300)))
+                    except ValueError:
+                        wait = 300
+                usage_note = f"[ERR]  usage HTTP {ex.code}, next try in {int(wait // 60)}m"
+                usage_wait_until = time.time() + wait
+            except Exception as ex:
+                usage_note, usage_wait_until = f"[ERR]  usage fetch: {ex}", time.time() + interval
+        else:
+            usage_note = f"[WAIT] limits paused, next try in {int((usage_wait_until - time.time()) // 60) + 1}m"
 
         waiting, working = session_scan()
         fresh, cold = split_waits(waiting)
@@ -737,7 +753,11 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float, wifi_
                 ser  = None
                 mode = None
 
-        if ok:
+        if ok and "warning_level" not in payload:
+            pend = new_pending()
+            print(f"\r{usage_note}  " + (f"waiting:{payload['waiting']}  " if payload.get('waiting') else ""),
+                  end="", flush=True)
+        elif ok:
             pend = new_pending()
             status = ["OK", "CAUTION", "WARNING", "CRITICAL"][payload["warning_level"]]
             tag    = "[WiFi]" if mode == "wifi" else "[USB] "

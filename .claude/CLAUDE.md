@@ -244,6 +244,13 @@ empty and the request silently does nothing.
 `achievements`, `answers_today`, `streak`, `waiting`, and heap (`heap_free`,
 `lv_free`, `lv_frag_pct`).
 
+### When limits can't be fetched
+A failed usage fetch (expired subscription, stale token, 429) no longer holds
+the rest back: waiting chats, "working" and XP keep going out and the screen
+keeps the last limits it got. On 429 the bridge waits as long as `Retry-After`
+asks (capped at 1 h) instead of retrying every minute, which only kept the
+limit in force; the log shows `[ERR] usage HTTP 429, next try in Nm`.
+
 ### Session Key
 - Stored in `~/Library/LaunchAgents/com.claude.cyd-bridge.plist` (outside git, never committed)
 - Get from: claude.ai → DevTools → Application → Cookies → `sessionKey`
