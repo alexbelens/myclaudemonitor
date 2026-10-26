@@ -183,6 +183,10 @@ static void update_clock_and_countdown(void) {
         update_realtime_ui("--:--", "", secs_left);
         return;
     }
+    if ((ti.tm_isdst > 0) != (g_tz_dst != 0)) {   /* summer time just turned on/off */
+        g_tz_dst = ti.tm_isdst > 0;
+        update_tz_display();
+    }
     char timebuf[8], datebuf[16];
     strftime(timebuf, sizeof(timebuf), "%H:%M", &ti);
     strftime(datebuf, sizeof(datebuf), "%a %d %b", &ti);  /* "Mon 17 May" */
@@ -377,22 +381,35 @@ static void alert_check_stale(void) {
  * Timezone — NVS persistence
  * ============================================================ */
 
+/* The offset is the standard (winter) one and the clock follows EU summer
+ * time on top of it, as Ukraine does. Until 2026-10 it was a fixed offset
+ * ("tz_offset", set to UTC+3 in summer), so the clock ran an hour fast after
+ * the switch on 25.10. That key held the summer offset, hence the −1. */
 static void load_tz_from_nvs(void) {
     Preferences prefs;
     prefs.begin("cyd", true);
-    g_tz_offset = prefs.getInt("tz_offset", 3);
+    if (prefs.isKey("tz_std")) g_tz_offset = prefs.getInt("tz_std", 2);
+    else                       g_tz_offset = prefs.getInt("tz_offset", 3) - 1;
     prefs.end();
 }
 
 static void save_tz_to_nvs(void) {
     Preferences prefs;
     prefs.begin("cyd", false);
-    prefs.putInt("tz_offset", g_tz_offset);
+    prefs.putInt("tz_std", g_tz_offset);
     prefs.end();
 }
 
 static void apply_timezone(void) {
-    configTime((long)g_tz_offset * 3600L, 0, "pool.ntp.org");
+    /* POSIX TZ: "<+02>-2<+03>,M3.5.0/3,M10.5.0/4". EU switches at 01:00 UTC
+     * on the last Sunday of March and October, i.e. at 1+N local standard
+     * time in spring and 2+N local summer time in autumn. */
+    int n = g_tz_offset;
+    char tz[64];
+    snprintf(tz, sizeof(tz), "<%+03d>%d<%+03d>,M3.5.0/%d,M10.5.0/%d",
+             n, -n, n + 1, 1 + n, 2 + n);
+    configTzTime(tz, "pool.ntp.org");
+    Serial.printf("[NTP] TZ %s\n", tz);
 }
 
 /* ============================================================
@@ -832,7 +849,7 @@ static void wifi_setup(void) {
     load_tz_from_nvs();
     apply_timezone();
     update_tz_display();
-    Serial.printf("[NTP] Syncing (UTC%+d)...\n", g_tz_offset);
+    Serial.printf("[NTP] Syncing (UTC%+d + EU summer time)...\n", g_tz_offset);
 
     /* Initial weather fetch after a short delay for NTP to settle */
     delay(1000);

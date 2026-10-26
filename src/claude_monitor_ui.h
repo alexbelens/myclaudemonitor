@@ -49,7 +49,8 @@ static bool g_usage_seen = false;
  * SHARED STATE (read/written by main.cpp)
  * ============================================================ */
 static char g_weather_str[48] = "--";   /* raw from fetch: "Partly cloudy +15°C" */
-static int  g_tz_offset       = 3;
+static int  g_tz_offset       = 2;   /* standard (winter) offset; DST adds 1 */
+static int  g_tz_dst          = 0;   /* 1 while summer time is on (set by main.cpp) */
 static int  g_tz_change       = 0;
 
 /* Parsed weather (filled by update_weather_display) */
@@ -583,8 +584,9 @@ static void update_alert_display(alert_state_t st) {
  * ============================================================ */
 static void update_tz_display(void) {
     char buf[16];
-    if (g_tz_offset >= 0) snprintf(buf, sizeof(buf), "UTC+%d", g_tz_offset);
-    else                   snprintf(buf, sizeof(buf), "UTC%d",  g_tz_offset);
+    int off = g_tz_offset + g_tz_dst;   /* what the clock shows right now */
+    if (off >= 0) snprintf(buf, sizeof(buf), "UTC+%d", off);
+    else          snprintf(buf, sizeof(buf), "UTC%d",  off);
     lv_label_set_text(lbl_tz, buf);
 }
 
