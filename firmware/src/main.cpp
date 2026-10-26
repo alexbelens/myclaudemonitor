@@ -798,6 +798,10 @@ static void wifi_setup(void) {
 
     Serial.printf("[WiFi] Connecting to %s", ssid.c_str());
     WiFi.mode(WIFI_STA);
+    /* Modem sleep (the default) makes the radio miss broadcasts: the Mac's
+     * ARP and mDNS queries went unanswered, so the bridge lost the device for
+     * hours while it sat on WiFi with weather updating. It's mains-powered. */
+    WiFi.setSleep(false);
     WiFi.begin(ssid.c_str(), pass.c_str());
 
     for (int i = 0; i < 20 && WiFi.status() != WL_CONNECTED; i++) {
@@ -967,6 +971,32 @@ void loop() {
         last_alert_ms = now_ms;
         fetch_alert();
         alert_check_stale();
+    }
+
+    /* WiFi watchdog. The core's auto-reconnect doesn't always bring the link
+     * back: on 2026-10-26 the device fell off WiFi twice (once for ~17 h) and
+     * kept running offline until it was power-cycled. Kick a reconnect after
+     * 30 s down; after 3 min save the pet and reboot, which is what worked. */
+    static unsigned long wifi_down_since_ms = 0, last_reconnect_ms = 0;
+    if (wifi_connected && !ap_mode_active) {
+        if (WiFi.status() == WL_CONNECTED) {
+            if (wifi_down_since_ms) Serial.println("[WiFi] Link back");
+            wifi_down_since_ms = 0;
+        } else if (!wifi_down_since_ms) {
+            wifi_down_since_ms = now_ms ? now_ms : 1;
+            last_reconnect_ms  = now_ms;
+            Serial.println("[WiFi] Link lost");
+        } else if (now_ms - wifi_down_since_ms >= 3UL * 60UL * 1000UL) {
+            Serial.println("[WiFi] Down for 3 min — rebooting");
+            pet_save_now();
+            delay(100);
+            ESP.restart();
+        } else if (now_ms - last_reconnect_ms >= 30000UL) {
+            last_reconnect_ms = now_ms;
+            Serial.println("[WiFi] Reconnecting...");
+            WiFi.disconnect(false);
+            WiFi.reconnect();
+        }
     }
 
     /* Timezone change from [−]/[+] buttons in Settings */

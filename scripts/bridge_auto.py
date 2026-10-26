@@ -321,6 +321,26 @@ def build_payload(usage: dict, plan_name: str) -> dict:
 # "No CYD found" never hides the real reason (DNS, refused, timeout).
 _last_wifi_error = ""
 _host_addr       = {}   # mDNS name -> resolved IP
+_last_ip         = {}   # mDNS name -> last IP that answered; survives forget_host
+                        # because mDNS on the office WiFi goes unanswered for hours
+LAST_IP_FILE     = Path.home() / ".claude" / "cyd-device-ip"   # ...and bridge restarts
+
+
+def remember_ip(host: str, ip: str) -> None:
+    if _last_ip.get(host) == ip:
+        return
+    _last_ip[host] = ip
+    try:
+        LAST_IP_FILE.write_text(json.dumps(_last_ip))
+    except OSError:
+        pass
+
+
+def load_last_ips() -> None:
+    try:
+        _last_ip.update(json.loads(LAST_IP_FILE.read_text()))
+    except (OSError, ValueError):
+        pass
 
 
 def host_addr(host: str) -> str:
@@ -331,7 +351,9 @@ def host_addr(host: str) -> str:
             info = socket.getaddrinfo(host, 80, socket.AF_INET, socket.SOCK_STREAM)
             _host_addr[host] = info[0][4][0]
         except OSError:
-            return host          # let urllib try the name itself
+            # Name unresolved: try where the device last was. On 2026-10-26 the
+            # name didn't resolve all day while the device answered at its IP.
+            return _last_ip.get(host, host)
     return _host_addr[host]
 
 
@@ -345,8 +367,17 @@ def wifi_available(host: str) -> bool:
     try:
         url = f"http://{host_addr(host)}/api/status"
         with urllib.request.urlopen(url, timeout=WIFI_TIMEOUT) as r:
+            ok = r.status == 200
+            if ok:
+                try:
+                    ip = json.loads(r.read().decode("utf-8", "ignore")).get("ip")
+                except ValueError:
+                    ip = None
+                if ip:
+                    _host_addr[host] = ip
+                    remember_ip(host, ip)
             _last_wifi_error = ""
-            return r.status == 200
+            return ok
     except Exception as ex:
         _last_wifi_error = f"{type(ex).__name__}: {ex}"
         # This probe is the only path back into "wifi" mode, so it has to drop
@@ -660,6 +691,7 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float, wifi_
             sys.exit(1)
 
     plan_name = plan or source_plan
+    load_last_ips()
     pend = new_pending()        # events claimed from the log, not yet delivered
     usage_wait_until = 0.0      # don't ask for limits before this (429 back-off)
 
