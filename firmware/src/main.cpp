@@ -545,16 +545,33 @@ static void http_handle_monitor(void) {
     }
 }
 
+/* Why WiFi drops, readable afterwards from /api/status without a cable:
+ * how many times, the last reason code (wifi_err_reason_t, e.g. 8 = we left,
+ * 15 = 4-way handshake timeout, 200 = beacon timeout, 201 = AP not found)
+ * and how long ago. */
+static uint16_t      wifi_drops       = 0;
+static uint8_t       wifi_last_reason = 0;
+static unsigned long wifi_last_drop_ms = 0;
+
+static void on_wifi_disconnected(WiFiEvent_t, WiFiEventInfo_t info) {
+    wifi_drops++;
+    wifi_last_reason  = info.wifi_sta_disconnected.reason;
+    wifi_last_drop_ms = millis();
+    Serial.printf("[WiFi] Disconnected, reason %u\n", wifi_last_reason);
+}
+
 static void http_handle_status(void) {
     lv_mem_monitor_t mon;
     lv_mem_monitor(&mon);
-    char resp[448];
+    char resp[576];
     snprintf(resp, sizeof(resp),
         "{\"ok\":true,\"version\":\"4.0\",\"ip\":\"%s\","
         "\"alert\":\"%s\",\"alert_uid\":%d,\"has_token\":%s,"
         "\"pet\":\"%s\",\"level\":%u,\"xp\":%u,\"xp_next\":%u,\"achievements\":%d,"
         "\"answers_today\":%u,\"streak\":%u,\"waiting\":%d,"
-        "\"heap_free\":%u,\"lv_free\":%u,\"lv_used_pct\":%u,\"lv_frag_pct\":%u}",
+        "\"heap_free\":%u,\"lv_free\":%u,\"lv_used_pct\":%u,\"lv_frag_pct\":%u,"
+        "\"uptime_s\":%lu,\"rssi\":%d,\"wifi_drops\":%u,\"wifi_last_reason\":%u,"
+        "\"wifi_last_drop_s_ago\":%ld}",
         WiFi.localIP().toString().c_str(),
         alert_state_name(g_alert_state),
         g_alert_uid,
@@ -563,7 +580,9 @@ static void http_handle_status(void) {
         (unsigned)pet_level_floor(pet_level_of(P.total_xp) + 1), pet_popcount(P.achs),
         (unsigned)P.answers_today, (unsigned)P.streak, pet_waiting_count(lv_tick_get()),
         (unsigned)ESP.getFreeHeap(), (unsigned)mon.free_size,
-        (unsigned)mon.used_pct, (unsigned)mon.frag_pct);
+        (unsigned)mon.used_pct, (unsigned)mon.frag_pct,
+        millis() / 1000UL, (int)WiFi.RSSI(), (unsigned)wifi_drops, (unsigned)wifi_last_reason,
+        wifi_drops ? (long)((millis() - wifi_last_drop_ms) / 1000UL) : -1L);
     http_server.send(200, "application/json", resp);
 }
 
@@ -780,6 +799,9 @@ static void stop_ap_portal(void) {
  * WiFi STA Setup
  * ============================================================ */
 
+static bool wifi_have_creds = false;   /* an SSID is saved: keep trying it */
+static void wifi_online(void);
+
 static void wifi_setup(void) {
     Preferences prefs;
     prefs.begin("wifi", true);
@@ -796,6 +818,8 @@ static void wifi_setup(void) {
         return;
     }
 
+    wifi_have_creds = true;
+    WiFi.onEvent(on_wifi_disconnected, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
     Serial.printf("[WiFi] Connecting to %s", ssid.c_str());
     WiFi.mode(WIFI_STA);
     /* Modem sleep (the default) makes the radio miss broadcasts: the Mac's
@@ -809,21 +833,26 @@ static void wifi_setup(void) {
         Serial.print(".");
     }
 
+    strncpy(g_wifi_ui_ssid, ssid.c_str(), sizeof(g_wifi_ui_ssid) - 1);
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("\n[WiFi] Failed — USB serial fallback");
+        /* loop() keeps retrying and calls wifi_online() once it's up */
+        Serial.println("\n[WiFi] Failed — retrying in the background, USB serial meanwhile");
         g_wifi_ui_state = WIFI_STATE_DISCONNECTED;
-        strncpy(g_wifi_ui_ssid, ssid.c_str(), sizeof(g_wifi_ui_ssid) - 1);
         g_wifi_ui_ip[0] = '\0';
         update_wifi_ui();
         return;
     }
+    Serial.println();
+    wifi_online();
+}
 
+/* Everything that needs the network, run once on the first connection. */
+static void wifi_online(void) {
     wifi_connected = true;
     String ip = WiFi.localIP().toString();
-    Serial.printf("\n[WiFi] Connected! IP: %s\n", ip.c_str());
+    Serial.printf("[WiFi] Connected! IP: %s\n", ip.c_str());
 
     g_wifi_ui_state = WIFI_STATE_CONNECTED;
-    strncpy(g_wifi_ui_ssid, ssid.c_str(), sizeof(g_wifi_ui_ssid) - 1);
     strncpy(g_wifi_ui_ip,   ip.c_str(),   sizeof(g_wifi_ui_ip)   - 1);
     update_wifi_ui();
 
@@ -971,6 +1000,20 @@ void loop() {
         last_alert_ms = now_ms;
         fetch_alert();
         alert_check_stale();
+    }
+
+    /* No connection since boot (the AP didn't answer in setup's 10 s): until
+     * 2026-10-27 the firmware gave up for good here, and the watchdog below
+     * never ran because it only guards a link that was once up. */
+    static unsigned long last_boot_retry_ms = 0;
+    if (wifi_have_creds && !wifi_connected && !ap_mode_active) {
+        if (WiFi.status() == WL_CONNECTED) {
+            wifi_online();
+        } else if (now_ms - last_boot_retry_ms >= 30000UL) {
+            last_boot_retry_ms = now_ms;
+            Serial.println("[WiFi] Still offline — reconnecting...");
+            WiFi.reconnect();
+        }
     }
 
     /* WiFi watchdog. The core's auto-reconnect doesn't always bring the link

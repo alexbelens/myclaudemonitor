@@ -651,8 +651,6 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float, wifi_
     ser              = None
     org_uuid         = None
     source_plan      = ""
-    wifi_check_every = 30
-    last_wifi_check  = 0
     use_oauth        = not session_key
 
     print("Claude Monitor CYD — Bridge")
@@ -698,9 +696,14 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float, wifi_
     while True:
         now = time.time()
 
-        # Mode detection
-        if mode != "wifi" and (now - last_wifi_check > wifi_check_every or mode is None):
-            last_wifi_check = now
+        # Mode detection. A cable beats WiFi: on 2026-10-27 the device sat at
+        # -85 dBm and the bridge flapped to WiFi on every probe that got
+        # through, then lost pushes there while the cable worked fine.
+        cable = find_serial_port(port_hint)
+        cable = cable if cable and os.path.exists(cable) else ""
+        if mode == "wifi" and cable:
+            mode = None
+        if mode is None and not cable:
             if wifi_available(wifi_host):
                 if mode != "wifi":
                     if ser:
@@ -775,7 +778,6 @@ def run_loop(session_key: str, plan: str, port_hint: str, interval: float, wifi_
             if not ok:
                 forget_host(wifi_host)
                 mode = None
-                last_wifi_check = 0
         elif mode == "serial" and ser:
             try:
                 line = json.dumps(payload, separators=(",", ":"), ensure_ascii=False) + "\n"
