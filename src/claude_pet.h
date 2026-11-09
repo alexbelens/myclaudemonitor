@@ -412,6 +412,20 @@ static void pet_on_events(int answers, int replies, int agents, int compactions)
     pet_add_xp(xp);
 }
 
+/* Raise the totals to what the transcripts say (never lower them: XP never
+ * goes down). Until 2026-11-09 the bridge kept only a chat's first answer,
+ * so the device had ~10k XP where Claude Code's logs showed ~40k. */
+static void pet_restore(uint32_t xp, uint32_t answers, uint32_t replies, uint32_t compactions) {
+    if (xp > P.total_xp) pet_add_xp(xp - P.total_xp);
+    if (answers > P.answers_total) P.answers_total = answers;
+    if (replies > P.replies_total) P.replies_total = (uint16_t)(replies > 65535 ? 65535 : replies);
+    if (compactions > P.compactions) P.compactions = (uint16_t)(compactions > 65535 ? 65535 : compactions);
+    if (P.answers_total >= 1000) pet_achieve(ACH_THOUSAND);
+    if (P.replies_total >= 100)  pet_achieve(ACH_TRUST);
+    if (P.compactions >= 10)     pet_achieve(ACH_ARCHIVIST);
+    pet_save_now();
+}
+
 /* Projects that finished answers since the last push, as CRC32 hex. */
 static void pet_on_projects(const char *csv) {
     int32_t d = pet_today(NULL, NULL);

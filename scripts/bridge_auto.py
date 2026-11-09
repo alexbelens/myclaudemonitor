@@ -597,6 +597,9 @@ def take_events(pend: dict) -> None:
                 if now - seen > AGENT_STALE_SEC:
                     del _agents[k]
             pend["ag"] = max(pend["ag"], sum(n for n, _ in _agents.values()))
+        if ev == "b":                       # a new turn: the next answer isn't a repeat.
+            _last_event.pop(sid, None)      # Until 2026-11-09 there was no such marker
+            continue                        # and every chat got XP for its first answer only.
         if ev not in XP_EVENTS:
             continue
         if _last_event.get(sid) == ev:      # same event twice in a row: once

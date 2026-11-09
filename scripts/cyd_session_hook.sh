@@ -42,6 +42,7 @@ mkdir -p "$dir" 2>/dev/null || exit 0
 #   S answer finished   Q you answered a permission or a question
 #   A subagent started  a subagent finished (no XP; for "three at once")
 #   C context compacted
+#   b back to work after a wait (no XP): the next S is a new answer
 prev=$(cat "$dir/$sid" 2>/dev/null)
 ev=
 case "$state" in
@@ -54,7 +55,9 @@ case "$state" in
         case "$prev" in
             "waiting permission"|"waiting question") ev=Q ;;
             *) [ "$(field tool_name)" = "AskUserQuestion" ] && ev=Q ;;
-        esac ;;
+        esac
+        # Without this the bridge saw S S S in a chat and kept only the first.
+        [ -z "$ev" ] && [ "${prev#waiting}" != "$prev" ] && ev=b ;;
 esac
 [ -n "$ev" ] && printf '%s %s\n' "$sid" "$ev" >> "$dir/.xp" 2>/dev/null
 

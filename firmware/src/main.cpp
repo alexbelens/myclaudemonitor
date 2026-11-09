@@ -598,6 +598,15 @@ static void http_handle_pet(void) {
     jstr(body.c_str(), "env",   env, sizeof(env), "");
     int sec = jint(body.c_str(), "sec", 20);
     int level = jint(body.c_str(), "level", 0);
+    /* One-off: {"restore_xp":40015,"restore_answers":3562,...} raises totals */
+    int rxp = jint(body.c_str(), "restore_xp", 0);
+    if (rxp > 0) {
+        pet_restore((uint32_t)rxp, (uint32_t)jint(body.c_str(), "restore_answers", 0),
+                    (uint32_t)jint(body.c_str(), "restore_replies", 0),
+                    (uint32_t)jint(body.c_str(), "restore_compactions", 0));
+        http_server.send(200, "application/json", "{\"ok\":true}");
+        return;
+    }
     pet_demo(st[0] ? st : NULL, env[0] ? env : NULL, level, sec);
     http_server.send(200, "application/json", "{\"ok\":true}");
 }
